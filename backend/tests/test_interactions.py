@@ -2,9 +2,9 @@ import unittest
 from types import SimpleNamespace
 
 from systems.interactions import normalize_actionable_payload, process_conversation_consequences
-from agents.agent_v2 import AgentV2
-from agents.profiles_v2 import AGENT_PROFILES_V2
-from simulation.world_v2 import WorldV2
+from agents.agent import Agent
+from agents.profiles import AGENT_PROFILES
+from simulation.world import World
 
 
 class InteractionNormalizationTests(unittest.TestCase):
@@ -41,8 +41,8 @@ class InteractionNormalizationTests(unittest.TestCase):
         self.assertEqual(result["scheduled_hour"], 18)
 
     def test_conversation_updates_social_model_and_intention(self):
-        world = WorldV2()
-        speaker = AgentV2(AGENT_PROFILES_V2[0], world)
+        world = World()
+        speaker = Agent(AGENT_PROFILES[0], world)
         convo = SimpleNamespace(
             interaction_type="planning",
             location="clearing",
@@ -69,8 +69,8 @@ class InteractionNormalizationTests(unittest.TestCase):
         self.assertTrue(any(intent.get("source") == "commitment" for intent in speaker.active_intentions))
 
     def test_support_signal_updates_alliance_and_creates_intention(self):
-        world = WorldV2()
-        speaker = AgentV2(AGENT_PROFILES_V2[0], world)
+        world = World()
+        speaker = Agent(AGENT_PROFILES[0], world)
         convo = SimpleNamespace(
             interaction_type="planning",
             location="clearing",

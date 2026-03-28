@@ -1,4 +1,4 @@
-# Agentica — Polis V2 Emergent Settlement Simulator
+# Agentica — Emergent Settlement Simulator
 
 A browser-based AI settlement simulator where 15 LLM-powered agents wake up in untouched wilderness, discover resources, talk, make plans, and slowly build a town together.
 
@@ -47,13 +47,11 @@ Important environment variables:
 
 Under Docker Compose, `DB_PATH` is explicitly set to `/app/data/agentica.db` so persistence survives backend container rebuilds.
 
-Simulation timing is currently controlled in backend config for the active `v2` runtime.
+Simulation timing is currently controlled in backend config.
 
 ## Runtime Notes
 
-- The active product runtime is `SimulationEngineV2`
 - Fresh compatible saves start from wilderness with no buildings
-- Older pre-refactor `v2` saves are intentionally ignored
 - God Mode is available as a debug/observer tool, not as the core governing model of the simulation
 
 ## License

@@ -300,8 +300,8 @@ class OverhearingSystem:
         }
 
 
-class ConversationV2:
-    """LLM-powered conversation with V2 cognitive context."""
+class Conversation:
+    """LLM-powered conversation with cognitive context."""
 
     def __init__(self, initiator, target, interaction_type: str, reason: str, location: str):
         self.participants = [initiator.name, target.name]
@@ -489,7 +489,7 @@ def _add_commitment(agent, commitment: dict, other_name: str, tick: int, day: in
         )
 
 
-def process_conversation_consequences(agent, other_name: str, conversation: ConversationV2, tick: int = 0, day: int = 0):
+def process_conversation_consequences(agent, other_name: str, conversation: Conversation, tick: int = 0, day: int = 0):
     """Apply all consequences of a completed conversation."""
     # Update relationship
     if other_name not in agent.relationships:
