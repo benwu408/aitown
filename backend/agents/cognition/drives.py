@@ -81,13 +81,25 @@ class DriveSystem:
         self._prev_dominant = current
         return changed
 
-    def should_interrupt_plan(self) -> tuple[bool, str]:
-        """Drives above critical thresholds override conscious plans."""
+    def should_interrupt_plan(self, can_resist: bool = False) -> tuple[bool, str]:
+        """Drives above critical thresholds override conscious plans.
+
+        When can_resist is True and purpose_need > 0.7, the agent can push
+        through non-critical drive thresholds (hunger, rest, social) at the
+        cost of mounting stress.  Safety is never resistible.
+        """
+        resisting = can_resist and self.purpose_need > 0.7
         if self.hunger > 0.8:
+            if resisting and self.hunger < 0.95:
+                return False, ""
             return True, "find_food"
         if self.rest > 0.9:
+            if resisting and self.rest < 0.98:
+                return False, ""
             return True, "go_sleep"
         if self.social_need > 0.85:
+            if resisting:
+                return False, ""
             return True, "seek_company"
         if self.safety_need > 0.9:
             return True, "seek_safety"

@@ -92,6 +92,12 @@ class Agent:
         self.secrets: list[dict] = []
         self.reputation: dict = {"generosity": 0.5, "honesty": 0.5, "reliability": 0.5, "kindness": 0.5}
 
+        # Health
+        self.health: float = 1.0
+        self.is_sick: bool = False
+        self.sick_since_tick: int = 0
+        self.last_steal_attempt_tick: int = -999
+
         # Movement
         self.path: list[tuple[int, int]] = []
         self.path_index: int = 0
@@ -328,6 +334,18 @@ class Agent:
         """Drive-based routine behavior — agents only go to places they know or can see."""
         import random as _rand
 
+        # Allow agents with strong purpose to resist non-critical drive interrupts
+        has_urgent_intention = any(
+            i.get("urgency", 0) > 0.7 and i.get("status") == "active"
+            for i in self.active_intentions[:3]
+        )
+        should_interrupt, interrupt_type = self.drives.should_interrupt_plan(can_resist=has_urgent_intention)
+        # If we resisted a drive that would have interrupted without can_resist, note the stress
+        if has_urgent_intention and not should_interrupt:
+            would_interrupt, _ = self.drives.should_interrupt_plan(can_resist=False)
+            if would_interrupt:
+                self.emotional_state.apply_event("anxiety", 0.1)
+
         # Personal night window → head home and sleep (but not if just woken up with low tiredness)
         if self.prefers_sleeping_now(hour) and self.drives.rest > 0.3:
             home = self._find_home()
@@ -473,10 +491,13 @@ class Agent:
             "colorIndex": self.profile.color_index,
             "sleepWindow": {"startHour": self.sleep_start_hour, "wakeHour": self.wake_hour},
             "summary": self._get_summary(),
+            "health": round(self.health, 2),
+            "isSick": self.is_sick,
             "state": {
                 "energy": round(1.0 - self.drives.rest, 2),
                 "hunger": round(self.drives.hunger, 2),
                 "mood": round(max(0, min(1, (self.emotional_state.valence + 1) / 2)), 2),
+                "health": round(self.health, 2),
                 "wealth": self._inventory_value(),
                 "debt": round(self.debt, 1),
                 "dailyIncome": round(self.daily_income, 1),

@@ -59,6 +59,9 @@ class EmotionalState:
             "lost_money": {"valence": -0.05, "anxiety": 0.1},
             "social_interaction": {"loneliness": -0.1, "joy": 0.05},
             "alone_too_long": {"loneliness": 0.1, "sadness": 0.05},
+            "shame": {"valence": -0.15, "shame": 0.25, "anxiety": 0.1},
+            "anxiety": {"valence": -0.1, "anxiety": 0.2},
+            "relief": {"valence": 0.1, "anxiety": -0.15, "joy": 0.05},
         }
 
         effects = EVENT_EFFECTS.get(event_type, {})

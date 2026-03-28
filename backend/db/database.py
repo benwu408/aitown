@@ -94,6 +94,10 @@ async def init_db():
             "active_conflicts_json": "TEXT DEFAULT '[]'",
             "plan_mode": "TEXT DEFAULT 'improvising'",
             "plan_deviation_reason": "TEXT DEFAULT ''",
+            "health": "REAL DEFAULT 1.0",
+            "is_sick": "INTEGER DEFAULT 0",
+            "sick_since_tick": "INTEGER DEFAULT 0",
+            "last_steal_attempt_tick": "INTEGER DEFAULT -999",
         })
         await db.commit()
     logger.info(f"Database initialized at {DB_PATH}")
@@ -137,8 +141,9 @@ async def save_world_state(engine) -> None:
                      plan_mode, plan_deviation_reason, self_concept, emotion,
                      emotions_json, drives_json, episodic_memory_json, working_memory_json,
                      beliefs_json, mental_models_json, skills_json, world_model_json,
-                     relationships_json, active_goals_json, social_commitments_json, inventory_json, secrets_json, opinions_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     relationships_json, active_goals_json, social_commitments_json, inventory_json, secrets_json, opinions_json,
+                     health, is_sick, sick_since_tick, last_steal_attempt_tick)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     agent.id,
                     agent.name,
@@ -179,6 +184,10 @@ async def save_world_state(engine) -> None:
                     json.dumps(agent.inventory),
                     json.dumps(agent.secrets),
                     json.dumps(agent.opinions),
+                    agent.health,
+                    1 if agent.is_sick else 0,
+                    agent.sick_since_tick,
+                    agent.last_steal_attempt_tick,
                 ))
 
             await db.commit()
@@ -266,6 +275,10 @@ async def load_world_state() -> dict | None:
                     "inventory": json.loads(d["inventory_json"]) if d["inventory_json"] else [],
                     "secrets": json.loads(d["secrets_json"]) if d["secrets_json"] else [],
                     "opinions": json.loads(d["opinions_json"]) if d["opinions_json"] else {},
+                    "health": d.get("health", 1.0) or 1.0,
+                    "is_sick": bool(d.get("is_sick", 0)),
+                    "sick_since_tick": d.get("sick_since_tick", 0) or 0,
+                    "last_steal_attempt_tick": d.get("last_steal_attempt_tick", -999) or -999,
                 }
 
             world = result.get("world", {})

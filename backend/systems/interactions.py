@@ -221,6 +221,20 @@ def select_interaction_type(agent, other, reason: str, rel: dict) -> str:
     if reason == "friend nearby" and sentiment > 0.5:
         return "deep" if familiarity > 0.3 else "small_talk"
 
+    # Gossip: familiar agents who have memories about third parties
+    if familiarity > 0.3:
+        third_party_memories = [
+            e for e in agent.episodic_memory.recent(15)
+            if e.agents_involved
+            and other.name not in e.agents_involved
+            and agent.name not in e.agents_involved[:1]
+        ]
+        hearsay_beliefs = [b for b in agent.belief_system.beliefs if getattr(b, "source_type", "") == "hearsay"]
+        if (third_party_memories or hearsay_beliefs):
+            extraversion = agent.profile.personality.get("extraversion", 0.5)
+            if random.random() < extraversion * 0.3:
+                return "gossip"
+
     if familiarity < 0.05:
         return "greeting"
 
@@ -324,6 +338,33 @@ class Conversation:
             counts[name] = counts.get(name, 0) + int(item.get("quantity", 1))
         return ", ".join(f"{qty} {name.replace('_', ' ')}" for name, qty in counts.items())
 
+    def _gossip_context(self, speaker, listener) -> str:
+        if self.interaction_type != "gossip":
+            return ""
+        pieces = []
+        # Recent memories involving third parties
+        for ep in speaker.episodic_memory.recent(20):
+            for name in ep.agents_involved:
+                if name != speaker.name and name != listener.name:
+                    pieces.append(f"- About {name}: {ep.content[:80]} (felt {ep.primary_emotion or 'neutral'})")
+                    break
+            if len(pieces) >= 3:
+                break
+        # Hearsay beliefs
+        for b in speaker.belief_system.beliefs:
+            if getattr(b, "source_type", "") == "hearsay" and listener.name.lower() not in b.content.lower():
+                pieces.append(f"- Heard from {getattr(b, 'source_agent', 'someone')}: {b.content[:80]}")
+            if len(pieces) >= 5:
+                break
+        if not pieces:
+            return ""
+        return (
+            "\nGOSSIP CONTEXT:\nYou have things you could share about other people:\n"
+            + "\n".join(pieces)
+            + "\nShare what you know, but filtered through YOUR personality and opinions. "
+            "You might exaggerate, downplay, or misremember details."
+        )
+
     def _trade_context(self, speaker, listener) -> str:
         if self.interaction_type != "trade":
             return ""
@@ -345,6 +386,7 @@ Be practical — offer what you have surplus of for what you actually need."""
         if not previous_speech:
             # Opening line
             trade_ctx = self._trade_context(speaker, listener)
+            gossip_ctx = self._gossip_context(speaker, listener)
             prompt = f"""You are {speaker.name}. You've decided to talk to {listener.name}.
 Why: {self.reason}. Type: {self.interaction_type}.
 
@@ -353,7 +395,7 @@ Your drives: {speaker.drives.get_prompt_description()}
 Your relationship with {listener.name}: sentiment={rel.get('sentiment',0.5):.1f}, trust={rel.get('trust',0.5):.1f}
 {mental_model}
 What's on your mind: {speaker.working_memory.get_prompt_context()}
-{trade_ctx}
+{trade_ctx}{gossip_ctx}
 Context: {self.location}. You're all new settlers who just arrived at this place.
 
 Start with something SPECIFIC: what you've noticed about this place, what you need help with, what you're curious about, something you discovered, or ask them about themselves. Don't just say "hello" or "how are you" — say something with substance. 1-2 sentences.
@@ -489,7 +531,7 @@ def _add_commitment(agent, commitment: dict, other_name: str, tick: int, day: in
         )
 
 
-def process_conversation_consequences(agent, other_name: str, conversation: Conversation, tick: int = 0, day: int = 0):
+def process_conversation_consequences(agent, other_name: str, conversation: Conversation, tick: int = 0, day: int = 0, all_agent_names: list[str] | None = None):
     """Apply all consequences of a completed conversation."""
     # Update relationship
     if other_name not in agent.relationships:
@@ -523,6 +565,27 @@ def process_conversation_consequences(agent, other_name: str, conversation: Conv
         summary, tick=tick, day=day, time_of_day="", location=conversation.location,
         category="conversation", intensity=0.5, agents=[other_name],
     )
+
+    # Gossip propagation: listener stores what they heard as hearsay beliefs
+    if conversation.interaction_type == "gossip" and all_agent_names:
+        for turn in conversation.turns:
+            if turn.get("speaker") == other_name:
+                speech = turn.get("speech", "")
+                for third_name in all_agent_names:
+                    if (
+                        third_name in speech
+                        and third_name != agent.name
+                        and third_name != other_name
+                    ):
+                        agent.belief_system.add(
+                            f"Heard from {other_name}: {speech[:100]}",
+                            category="person_model",
+                            confidence=0.35,
+                            tick=tick,
+                            source="hearsay",
+                            source_agent=other_name,
+                        )
+                        break  # One hearsay belief per turn is enough
 
     # Update mental model
     if conversation.interaction_type != "argument":
@@ -749,6 +812,68 @@ def get_social_modifier(location: str) -> float:
     if "tavern" in location or "meeting" in location or "hall" in location:
         base += 0.3
     return base
+
+
+class GroupConversation:
+    """Multi-agent meeting where participants take turns speaking."""
+
+    def __init__(self, participants: list, topic: str, location: str, max_rounds: int = 2):
+        self.participants = participants
+        self.topic = topic
+        self.location = location
+        self.max_rounds = max_rounds
+        self.turns: list[dict] = []
+        self.structured_commitments: list[dict] = []
+        self.structured_proposals: list[dict] = []
+
+    async def run(self) -> list[dict]:
+        from llm.client import llm_client
+
+        # Cap participants to avoid LLM cost explosion
+        active = self.participants[:6]
+        transcript: list[dict] = []
+
+        for _round in range(self.max_rounds):
+            for speaker in active:
+                others = [p for p in active if p.id != speaker.id]
+                others_str = ", ".join(o.name for o in others)
+                prev_speech = "; ".join(
+                    f"{t['speaker']}: {t['speech']}" for t in transcript[-4:]
+                )
+
+                prompt = f"""You are {speaker.name} at a group meeting about: {self.topic}
+
+Present: {others_str}
+Previous discussion: {prev_speech or 'Meeting just started.'}
+
+Your emotional state: {speaker.emotional_state.get_prompt_description()}
+Your drives: {speaker.drives.get_prompt_description()}
+
+Respond with 1-2 sentences. You can agree, disagree, propose something, or ask a question.
+
+Return JSON:
+{{"speech": "what you say", "inner_thought": "what you're thinking", "actionable": {{"kind": "proposal/support_signal/opposition_signal or null", "description": "clear statement or null", "participants": ["names"]}}}}"""
+
+                result = await llm_client.generate_json(
+                    f"You are {speaker.name}, a {speaker.profile.age}-year-old in a settlement meeting.",
+                    prompt,
+                    default={"speech": "...", "inner_thought": ""},
+                )
+                turn = {"speaker": speaker.name, **result}
+                transcript.append(turn)
+                self.turns.append(turn)
+
+                # Process actionable payloads
+                actionable = result.get("actionable")
+                if isinstance(actionable, dict) and actionable.get("kind") and actionable.get("description"):
+                    actionable.setdefault("participants", [p.name for p in active])
+                    actionable["location"] = self.location
+                    if actionable["kind"] == "proposal":
+                        self.structured_proposals.append(actionable)
+                    else:
+                        self.structured_commitments.append(actionable)
+
+        return transcript
 
 
 # Singletons

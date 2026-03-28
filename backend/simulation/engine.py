@@ -135,6 +135,12 @@ class SimulationEngine:
             agent.secrets = saved.get("secrets", [])
             agent.opinions = saved.get("opinions", {})
 
+            # Health
+            agent.health = saved.get("health", 1.0)
+            agent.is_sick = saved.get("is_sick", False)
+            agent.sick_since_tick = saved.get("sick_since_tick", 0)
+            agent.last_steal_attempt_tick = saved.get("last_steal_attempt_tick", -999)
+
         for agent in self.agents.values():
             if not agent.path and agent.current_action in (ActionType.WALKING, ActionType.TALKING):
                 agent.current_action = ActionType.IDLE
@@ -823,7 +829,111 @@ class SimulationEngine:
                     inst["activity_level"] = round(min(1.0, inst.get("activity_level", 0.4) + 0.08), 2)
                     inst["legitimacy"] = round(min(1.0, inst.get("legitimacy", 0.4) + 0.05), 2)
                 events.append({"type": "system_event", "eventType": "meeting_held", "label": "Meeting", "description": meeting["outcome"]})
+                # Run actual group conversation asynchronously
+                present_agents = [a for a in self.agents.values() if a.name in present]
+                if len(present_agents) >= 2:
+                    asyncio.create_task(self._run_group_meeting(meeting, present_agents))
         return events
+
+    async def _run_group_meeting(self, meeting: dict, participants: list):
+        """Run an LLM-powered group conversation for a meeting."""
+        from systems.interactions import GroupConversation, process_conversation_consequences, overhearing_system
+        try:
+            for p in participants:
+                p.is_in_conversation = True
+
+            group_convo = GroupConversation(
+                participants=participants,
+                topic=meeting.get("topic", "community matters"),
+                location=meeting.get("location", "clearing"),
+                max_rounds=2,
+            )
+            transcript = await group_convo.run()
+
+            # Broadcast speech events
+            for turn in transcript:
+                speaker_agent = next((a for a in participants if a.name == turn.get("speaker")), None)
+                if speaker_agent and self._broadcast and turn.get("speech"):
+                    await self._broadcast({"type": "tick", "data": {
+                        "tick": self.tick,
+                        "time": self.time_manager.to_dict(),
+                        "events": [{"type": "agent_speak", "agentId": speaker_agent.id, "speech": turn["speech"]}],
+                        "agents": [a.to_dict() for a in self.agents.values()],
+                    }})
+
+            # Apply consequences: every participant gets memory and relationship updates
+            all_names = [a.name for a in self.agents.values()]
+            for agent in participants:
+                others = [p.name for p in participants if p.id != agent.id]
+                summary = f"Meeting about {meeting.get('topic', 'community matters')}: " + "; ".join(
+                    f"{t['speaker']}: {t.get('speech', '...')[:40]}" for t in transcript[:4]
+                )
+                agent.episodic_memory.add_simple(
+                    summary, tick=self.tick, day=self.time_manager.day,
+                    time_of_day=self.time_manager.time_of_day, location=meeting.get("location", ""),
+                    category="conversation", intensity=0.6, emotion="engaged", agents=others,
+                )
+                for other_name in others:
+                    if other_name not in agent.relationships:
+                        agent.relationships[other_name] = {"sentiment": 0.5, "trust": 0.5, "familiarity": 0.1}
+                    agent.relationships[other_name]["familiarity"] = min(
+                        1.0, agent.relationships[other_name].get("familiarity", 0.1) + 0.02
+                    )
+
+            # Create proposals from meeting
+            for proposal in group_convo.structured_proposals:
+                proposer_name = None
+                for turn in transcript:
+                    act = turn.get("actionable")
+                    if isinstance(act, dict) and act.get("kind") == "proposal" and act.get("description") == proposal.get("description"):
+                        proposer_name = turn.get("speaker")
+                        break
+                proposer = next((a for a in participants if a.name == proposer_name), participants[0]) if proposer_name else participants[0]
+                self._make_proposal(
+                    proposer, proposal.get("description", ""), meeting.get("location", ""),
+                    proposal.get("participants", [p.name for p in participants]),
+                    kind="social_rule",
+                )
+
+            # Process support/opposition signals
+            for commitment in group_convo.structured_commitments:
+                kind = commitment.get("kind")
+                desc = commitment.get("description", "")
+                for agent in participants:
+                    if kind == "support_signal":
+                        agent.mental_models.update_from_interaction(
+                            commitment.get("speaker", ""), tick=self.tick, alliance_delta=0.05,
+                        )
+                    elif kind == "opposition_signal":
+                        agent.mental_models.update_from_interaction(
+                            commitment.get("speaker", ""), tick=self.tick, alliance_delta=-0.05,
+                        )
+
+            # Overhearing by non-participants at the same location
+            for turn in transcript:
+                speaker_name = turn.get("speaker", "")
+                speech = turn.get("speech", "")
+                if not speech:
+                    continue
+                for observer in self.agents.values():
+                    if observer.name in [p.name for p in participants]:
+                        continue
+                    if observer.current_location != meeting.get("location"):
+                        continue
+                    dist = 2  # Same location, close proximity
+                    overhearing_system.process(observer, [speaker_name, "meeting"], speech, dist)
+
+            self._add_story_highlight(
+                "meeting_held",
+                f"Group meeting about '{meeting.get('topic', '?')}' with {len(participants)} people.",
+                agent_name=participants[0].name if participants else None,
+            )
+        except Exception as e:
+            logger.error("Group meeting error: %s", e)
+        finally:
+            for p in participants:
+                p.is_in_conversation = False
+                p.conversation_cooldown = 30
 
     def _apply_social_enforcement(self) -> list[dict]:
         events = []
@@ -1448,6 +1558,260 @@ class SimulationEngine:
         ticks_next_day = wake_tick_in_day
         return self.tick + ticks_until_midnight + ticks_next_day
 
+    # ── Emergent behavior methods ──────────────────────────────────
+
+    def _check_desperation_actions(self) -> list[dict]:
+        """Agents in extreme need may steal food.  Gated by personality, not LLM."""
+        from systems.economy import FOOD_ITEMS
+        events: list[dict] = []
+        for agent in self.agents.values():
+            if agent.drives.hunger < 0.85 or agent.is_in_conversation:
+                continue
+            if self.tick - agent.last_steal_attempt_tick < 200:
+                continue
+            has_food = any(i.get("name") in FOOD_ITEMS for i in agent.inventory)
+            if has_food:
+                continue
+
+            # Find nearby targets with food
+            candidates = []
+            for other in self.agents.values():
+                if other.id == agent.id:
+                    continue
+                dist = abs(agent.position[0] - other.position[0]) + abs(agent.position[1] - other.position[1])
+                if dist > 3:
+                    continue
+                target_food = [i for i in other.inventory if i.get("name") in FOOD_ITEMS]
+                if target_food:
+                    candidates.append((other, target_food[0], dist))
+            if not candidates:
+                continue
+
+            # Personality gate
+            conscientiousness = agent.profile.personality.get("conscientiousness", 0.5)
+            agreeableness = agent.profile.personality.get("agreeableness", 0.5)
+            resistance = conscientiousness * 0.4 + agreeableness * 0.3
+            desperation = (agent.drives.hunger - 0.7) * 3.0
+            if random.random() > desperation - resistance:
+                continue
+
+            agent.last_steal_attempt_tick = self.tick
+            target, food_item, dist = min(candidates, key=lambda x: x[2])
+            food_name = food_item.get("name", "food")
+
+            # Transfer
+            if target.consume_inventory(food_name, 1):
+                agent.inventory.append({"name": food_name, "quantity": 1})
+
+            agent.current_action = ActionType.STEALING
+
+            # Detection
+            dexterity = agent.profile.physical_traits.get("dexterity", 0.5)
+            detection_chance = 0.4 + (1.0 - dexterity) * 0.3
+            detected_by: list[str] = []
+            if random.random() < detection_chance:
+                detected_by.append(target.name)
+            for observer in self.agents.values():
+                if observer.id in (agent.id, target.id):
+                    continue
+                obs_dist = abs(observer.position[0] - agent.position[0]) + abs(observer.position[1] - agent.position[1])
+                if obs_dist <= 4 and random.random() < 0.3:
+                    detected_by.append(observer.name)
+
+            if detected_by:
+                self._record_social_breach(agent, detected_by, f"{agent.name} stole {food_name} from {target.name}", kind="theft", severity=0.7)
+                agent.reputation["honesty"] = max(0.0, agent.reputation.get("honesty", 0.5) - 0.15)
+                agent.emotional_state.apply_event("shame", 0.5)
+                target.emotional_state.apply_event("witnessed_injustice", 0.6)
+                for name in detected_by:
+                    det = next((a for a in self.agents.values() if a.name == name), None)
+                    if det:
+                        det.episodic_memory.add_simple(
+                            f"I saw {agent.name} steal {food_name} from {target.name}!",
+                            tick=self.tick, day=self.time_manager.day,
+                            time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                            category="observation", intensity=0.8, emotion="shocked", agents=[agent.name, target.name],
+                        )
+                self.world.add_norm_violation({
+                    "tick": self.tick, "agent": agent.name, "norm": "Do not steal",
+                    "location": agent.current_location,
+                    "description": f"{agent.name} stole {food_name} from {target.name}",
+                })
+                self._add_story_highlight("crisis", f"{agent.name} was caught stealing from {target.name}!", agent.id, agent.name)
+                events.append({"type": "system_event", "eventType": "theft_detected", "label": "Theft!", "description": f"{agent.name} stole {food_name} from {target.name}"})
+            else:
+                agent.episodic_memory.add_simple(
+                    f"I stole some {food_name} from {target.name}. Nobody saw.",
+                    tick=self.tick, day=self.time_manager.day,
+                    time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                    category="action", intensity=0.7, emotion="guilty", agents=[target.name],
+                )
+                agent.secrets.append({"content": f"Stole {food_name} from {target.name}", "tick": self.tick})
+                agent.emotional_state.apply_event("shame", 0.3)
+
+        return events
+
+    def _process_sickness(self) -> list[dict]:
+        """Simple health/sickness system.  Agents can get sick and heal with herbs."""
+        events: list[dict] = []
+        for agent in self.agents.values():
+            if agent.is_sick:
+                agent.health = max(0.1, agent.health - 0.05)
+                agent.drives.rest = min(1.0, agent.drives.rest + 0.05)
+                # Self-heal with herbs
+                if agent.inventory_count("wild_herbs") >= 1:
+                    agent.consume_inventory("wild_herbs", 1)
+                    agent.is_sick = False
+                    agent.sick_since_tick = 0
+                    agent.health = min(1.0, agent.health + 0.3)
+                    agent.episodic_memory.add_simple(
+                        "I used some herbs and I'm starting to feel better.",
+                        tick=self.tick, day=self.time_manager.day,
+                        time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                        category="action", intensity=0.5, emotion="relieved",
+                    )
+                    events.append({"type": "system_event", "eventType": "healed", "label": "Healed", "description": f"{agent.name} recovered using herbs."})
+                elif self.tick - agent.sick_since_tick > 300 and random.random() < 0.3:
+                    agent.is_sick = False
+                    agent.sick_since_tick = 0
+                    agent.health = min(1.0, agent.health + 0.1)
+            else:
+                base_chance = 0.005
+                if agent.drives.rest > 0.7:
+                    base_chance += 0.01
+                if agent.health < 0.7:
+                    base_chance += 0.01
+                if random.random() < base_chance:
+                    agent.is_sick = True
+                    agent.sick_since_tick = self.tick
+                    agent.health = max(0.3, agent.health - 0.2)
+                    agent.working_memory.push("I don't feel well...")
+                    agent.emotional_state.apply_event("anxiety", 0.3)
+                    self._add_story_highlight("health", f"{agent.name} has fallen ill.", agent.id, agent.name)
+                    events.append({"type": "system_event", "eventType": "fell_sick", "label": "Illness", "description": f"{agent.name} has fallen ill."})
+        return events
+
+    def _check_creative_actions(self) -> list[dict]:
+        """Agents with high openness may create art."""
+        events: list[dict] = []
+        for agent in self.agents.values():
+            if agent.current_action.value != "idle" or agent.is_in_conversation:
+                continue
+            openness = agent.profile.personality.get("openness", 0.5)
+            if openness < 0.6:
+                continue
+            if agent.drives.hunger > 0.6 or agent.drives.rest > 0.7:
+                continue
+            if random.random() > openness * 0.15:
+                continue
+
+            art = {
+                "name": f"artwork_by_{agent.name.split()[0].lower()}_{self.tick}",
+                "type": "art",
+                "created_by": agent.name,
+                "location": agent.current_location,
+                "tick": self.tick,
+            }
+            self.world.created_objects.append(art)
+            agent.skill_memory.record_attempt("art", True, 0.7)
+            agent.emotional_state.apply_event("goal_achieved", 0.4)
+            agent.episodic_memory.add_simple(
+                f"I created something today, a piece of art at the {agent.current_location.replace('_', ' ')}.",
+                tick=self.tick, day=self.time_manager.day,
+                time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                category="action", intensity=0.6, emotion="proud",
+            )
+
+            for other in self.agents.values():
+                if other.id == agent.id:
+                    continue
+                dist = abs(agent.position[0] - other.position[0]) + abs(agent.position[1] - other.position[1])
+                if dist <= 6:
+                    other.episodic_memory.add_simple(
+                        f"I saw {agent.name} creating art at the {agent.current_location.replace('_', ' ')}.",
+                        tick=self.tick, day=self.time_manager.day,
+                        time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                        category="observation", intensity=0.4, emotion="curious", agents=[agent.name],
+                    )
+                    if other.profile.personality.get("openness", 0.5) > 0.5:
+                        other.emotional_state.apply_event("positive_conversation", 0.2)
+
+            self._add_story_highlight("culture", f"{agent.name} created art at {agent.current_location.replace('_', ' ')}.", agent.id, agent.name)
+            events.append({"type": "system_event", "eventType": "art_created", "label": "Art Created", "description": f"{agent.name} created art at {agent.current_location}"})
+        return events
+
+    def _collect_taxes(self) -> list[dict]:
+        """Collect taxes when a taxation rule exists in the constitution."""
+        from systems.economy import EFFORT_VALUES
+        events: list[dict] = []
+        tax_rule = self.world.constitution.economic_rules.get("taxation")
+        if not tax_rule:
+            return events
+
+        # Try to identify the taxed item from the rule text
+        tax_item = None
+        for item_name in EFFORT_VALUES:
+            if item_name.replace("_", " ") in str(tax_rule).lower():
+                tax_item = item_name
+                break
+        if not tax_item:
+            # Default: tax the most common item
+            counts: dict[str, int] = {}
+            for agent in self.agents.values():
+                for item in agent.inventory:
+                    name = item.get("name", "")
+                    counts[name] = counts.get(name, 0) + int(item.get("quantity", 1))
+            if counts:
+                tax_item = max(counts, key=counts.get)
+        if not tax_item:
+            return events
+
+        tax_rate = 0.1
+        collected = 0
+        leader_name = self.world.constitution.governance_rules.get("informal_leader", "")
+
+        for agent in self.agents.values():
+            qty = agent.inventory_count(tax_item)
+            tax_amount = max(1, int(qty * tax_rate))
+            if qty < tax_amount + 1:
+                continue
+
+            # Tax refusal: low conscientiousness or low trust in leader
+            conscientiousness = agent.profile.personality.get("conscientiousness", 0.5)
+            trust_in_leader = 0.5
+            if leader_name and leader_name in agent.relationships:
+                trust_in_leader = agent.relationships[leader_name].get("trust", 0.5)
+            refuse_chance = max(0, 0.3 - conscientiousness * 0.3 - trust_in_leader * 0.2)
+            if random.random() < refuse_chance:
+                self.world.add_norm_violation({
+                    "tick": self.tick, "agent": agent.name, "norm": "Pay taxes",
+                    "location": agent.current_location,
+                    "description": f"{agent.name} refused to pay the {tax_item.replace('_', ' ')} tax.",
+                })
+                agent.episodic_memory.add_simple(
+                    f"I refused to pay the tax today. Why should I?",
+                    tick=self.tick, day=self.time_manager.day,
+                    time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                    category="action", intensity=0.5, emotion="defiant",
+                )
+                continue
+
+            if agent.consume_inventory(tax_item, tax_amount):
+                self.world.shared_pool[tax_item] = self.world.shared_pool.get(tax_item, 0) + tax_amount
+                collected += tax_amount
+                agent.episodic_memory.add_simple(
+                    f"Paid {tax_amount} {tax_item.replace('_', ' ')} in taxes.",
+                    tick=self.tick, day=self.time_manager.day,
+                    time_of_day=self.time_manager.time_of_day, location=agent.current_location,
+                    category="action", intensity=0.3, emotion="neutral",
+                )
+
+        if collected > 0:
+            events.append({"type": "system_event", "eventType": "tax_collected", "label": "Taxes Collected", "description": f"{collected} {tax_item.replace('_', ' ')} collected in taxes."})
+        return events
+
+    # ── End emergent behavior methods ────────────────────────────
+
     def _process_tick(self) -> list[dict]:
         events = []
         hour = self.time_manager.hour
@@ -1503,6 +1867,9 @@ class SimulationEngine:
             if agent.current_action.value == "eating":
                 agent.drives.satisfy_hunger()
             agent.emotional_state.decay(1)
+            # Keep sickness in the agent's conscious awareness
+            if agent.is_sick and self.tick % 20 == 0:
+                agent.working_memory.latest_sensation = "I feel feverish and weak."
             if self.tick % 10 == 0:
                 agent.working_memory.update_from_drives(agent.drives)
 
@@ -1598,6 +1965,13 @@ class SimulationEngine:
 
         if self.tick % 30 == 0:
             asyncio.create_task(self._process_novel_action())
+            events.extend(self._check_desperation_actions())
+
+        if self.tick % 50 == 0:
+            events.extend(self._process_sickness())
+
+        if self.tick % 80 == 0:
+            events.extend(self._check_creative_actions())
 
         if self.tick % 100 == 0:
             from systems.meta_simulation import meta_simulation
@@ -1606,6 +1980,10 @@ class SimulationEngine:
         if self.tick % 200 == 0:
             from systems.coherence import coherence_checker
             coherence_checker.check(self.agents, self.world)
+
+        # Collect taxes once per day at noon
+        if self.time_manager.tick_in_day == self.time_manager.ticks_per_day // 2:
+            events.extend(self._collect_taxes())
 
         return events
 
@@ -1893,8 +2271,9 @@ class SimulationEngine:
                 if not result.get("wants_to_continue", True):
                     break
 
-            process_conversation_consequences(agent, target.name, convo, tick=self.tick, day=self.time_manager.day)
-            process_conversation_consequences(target, agent.name, convo, tick=self.tick, day=self.time_manager.day)
+            all_names = [a.name for a in self.agents.values()]
+            process_conversation_consequences(agent, target.name, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
+            process_conversation_consequences(target, agent.name, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
             if convo.structured_commitments:
                 description = convo.structured_commitments[-1]["description"]
                 self._add_story_highlight("new_goal", f"{agent.name} wants to: {description}", agent.id, agent.name)

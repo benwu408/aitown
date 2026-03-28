@@ -208,6 +208,7 @@ class World:
         self.coalitions: list[dict] = []
         self.norm_violations: list[dict] = []
         self.projects: list[dict] = []
+        self.shared_pool: dict[str, int] = {}  # Communal resource pool (taxes, donations)
         self.tile_resource_state: dict[str, dict[str, int]] = {}
         self.tiles: list[list[dict]] = []
         self._path_cache: dict = {}
@@ -741,6 +742,7 @@ class World:
             "projects": self.projects[-50:],
             "next_building_id": self._next_building_id,
             "tile_resource_state": self.tile_resource_state,
+            "shared_pool": self.shared_pool,
         }
 
     def load_from_save(self, data: dict):
@@ -764,6 +766,8 @@ class World:
             self.norm_violations = data["norm_violations"]
         if data.get("projects"):
             self.projects = data["projects"]
+        if data.get("shared_pool"):
+            self.shared_pool = data["shared_pool"]
         self._next_building_id = data.get("next_building_id", self._next_building_id)
         self._generate_world()
         if data.get("tile_resource_state"):
