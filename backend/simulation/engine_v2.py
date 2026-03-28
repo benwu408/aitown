@@ -12,6 +12,7 @@ from agents.agent_v2 import AgentV2
 from agents.profiles_v2 import AGENT_PROFILES_V2
 from simulation.actions import ActionType
 from db.database_v2 import init_db_v2, save_world_state_v2, load_world_state_v2
+from systems.economy import EconomySystem
 
 logger = logging.getLogger("agentica.engine")
 
@@ -23,6 +24,7 @@ class SimulationEngineV2:
         self.running = False
         self.time_manager = TimeManager(ticks_per_day=TICKS_PER_DAY)
         self.world = WorldV2()
+        self.economy = EconomySystem()
         self._broadcast: Callable[[dict], Coroutine] | None = None
         self.agents: dict[str, AgentV2] = {}
         self.story_highlights: list[dict] = []
@@ -438,6 +440,8 @@ class SimulationEngineV2:
 
     def _evaluate_proposal_kind(self, description: str) -> str:
         lower = description.lower()
+        if any(word in lower for word in ("currency", "money", "trade", "market", "price", "barter", "exchange", "tax", "tariff")):
+            return "economic_rule"
         if any(word in lower for word in ("rule", "respect", "share", "must", "should")):
             return "social_rule"
         if any(word in lower for word in ("meeting", "gathering place", "hall")):
@@ -716,7 +720,29 @@ class SimulationEngineV2:
         description = proposal.get("description", "")
         location = proposal.get("location", "clearing")
         kind = proposal.get("kind", "collective_decision")
-        if kind == "social_rule":
+        if kind == "economic_rule":
+            # Write the rule into the constitution's economic rules
+            lower = description.lower()
+            if "currency" in lower or "money" in lower:
+                # Extract what they want to use as currency
+                self.world.constitution.economic_rules["currency"] = description
+                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Economic Rule", "description": f"Currency established: {description}"})
+                self._add_story_highlight("milestone", f"Economic rule adopted: {description}", None, None)
+            elif "market" in lower:
+                self.world.constitution.economic_rules["trade_rules"].append(description)
+                # Create a market as a project
+                project = self._create_project_from_proposal(proposal)
+                events.append({"type": "system_event", "eventType": "project_started", "label": "Market", "description": f"Market project started: {description}"})
+            elif "tax" in lower or "tariff" in lower:
+                self.world.constitution.economic_rules["taxation"] = description
+                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Taxation", "description": description})
+            else:
+                self.world.constitution.economic_rules["trade_rules"].append(description)
+                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Trade Rule", "description": description})
+            # Also add as a norm so agents recognize it
+            self.world.add_norm(description, self.tick, category="economic", origin="collective_agreement")
+            self.world.constitution.change_history.append({"tick": self.tick, "type": "economic_rule_adopted", "description": description})
+        elif kind == "social_rule":
             norm = self.world.add_norm(description, self.tick, category="proposal", origin="collective_agreement")
             self.world.constitution.change_history.append({"tick": self.tick, "type": "proposal_accepted", "description": description})
             events.append({"type": "system_event", "eventType": "norm_emergence", "label": "Social Norm", "description": norm["text"]})
@@ -916,51 +942,235 @@ class SimulationEngineV2:
                 events.append({"type": "system_event", "eventType": "project_progress", "label": "Project Progress", "description": f"{project['name']} reached {int(project['progress'] * 100)}%."})
         return events
 
-    def _attempt_barter_trades(self) -> list[dict]:
+    def _execute_trade(self, agent: AgentV2, partner: AgentV2, give_item: str, give_qty: int, recv_item: str, recv_qty: int, context: str = "barter") -> list[dict]:
+        """Execute an inventory swap between two agents. Returns events."""
         events = []
+        if not agent.consume_inventory(give_item, give_qty):
+            return events
+        if not partner.consume_inventory(recv_item, recv_qty):
+            # Rollback
+            agent.inventory.append({"name": give_item, "quantity": give_qty})
+            return events
+
+        agent.inventory.append({"name": recv_item, "quantity": recv_qty})
+        partner.inventory.append({"name": give_item, "quantity": give_qty})
+
+        # Record in world trade log
+        trade = {
+            "from_agent": agent.name,
+            "to_agent": partner.name,
+            "items_given": {give_item: give_qty},
+            "items_received": {recv_item: recv_qty},
+            "item": recv_item,
+            "context": context,
+            "tick": self.tick,
+        }
+        self.world.record_trade(trade)
+
+        # Record in economy system
+        self.economy.record_trade(
+            self.tick, agent.name, partner.name,
+            give_item, give_qty, recv_item, recv_qty,
+            context=context, season=self.time_manager.season,
+        )
+
+        # Update reciprocity and mental models
+        agent.note_reciprocity(partner.name, gave={give_item: give_qty}, received={recv_item: recv_qty})
+        partner.note_reciprocity(agent.name, gave={recv_item: recv_qty}, received={give_item: give_qty})
+        agent.mental_models.update_from_interaction(partner.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
+        partner.mental_models.update_from_interaction(agent.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
+
+        # Skill tracking
+        agent.skill_memory.record_attempt("trading", True, 0.5)
+        partner.skill_memory.record_attempt("trading", True, 0.5)
+
+        give_label = give_item.replace("_", " ")
+        recv_label = recv_item.replace("_", " ")
+        agent.add_life_event(f"Traded {give_qty} {give_label} for {recv_qty} {recv_label} with {partner.name}.", self.tick, category="trade", impact=0.35)
+        partner.add_life_event(f"Traded {recv_qty} {recv_label} for {give_qty} {give_label} with {agent.name}.", self.tick, category="trade", impact=0.35)
+
+        events.append({"type": "transaction", "agentId": agent.id, "item": recv_item, "price": give_qty, "action": "barter"})
+        events.append({"type": "system_event", "eventType": "barter_trade", "label": "Trade", "description": f"{agent.name} traded {give_qty} {give_label} for {recv_qty} {recv_label} with {partner.name}."})
+        return events
+
+    def _attempt_barter_trades(self) -> list[dict]:
+        """Drive-based automatic bartering + resolve conversation-initiated trade intentions."""
+        events = []
+
+        # 1. Resolve conversation-initiated trade intentions
+        events.extend(self._resolve_trade_intentions())
+
+        # 2. Automatic need-based bartering for desperate agents
+        from systems.economy import FOOD_ITEMS, BUILDING_ITEMS
         for agent in self.agents.values():
             if agent.drives.hunger < 0.75 and agent.drives.shelter_need < 0.75:
                 continue
-            desired = "wild_berries" if agent.drives.hunger >= agent.drives.shelter_need else "wood"
-            surplus_item = "wood" if desired != "wood" and agent.inventory_count("wood") > 1 else None
-            if desired == "wood":
-                for candidate in ("wild_berries", "fish", "wild_plants"):
-                    if agent.inventory_count(candidate) > 1:
-                        surplus_item = candidate
-                        break
+            # Determine what we need and what we can offer
+            if agent.drives.hunger >= agent.drives.shelter_need:
+                desired_set = FOOD_ITEMS
+                surplus_set = BUILDING_ITEMS
+            else:
+                desired_set = BUILDING_ITEMS
+                surplus_set = FOOD_ITEMS
+
+            # Find what we have surplus of
+            surplus_item = None
+            for item_name in surplus_set:
+                if agent.inventory_count(item_name) > 1:
+                    surplus_item = item_name
+                    break
             if not surplus_item:
                 continue
-            partners = [other for other in self.agents.values() if other.id != agent.id and other.inventory_count(desired) > 0]
-            partners.sort(key=lambda other: self._support_score_for(agent, other.name), reverse=True)
-            if not partners:
+
+            # Find a co-located partner who has what we need
+            desired_item = None
+            best_partner = None
+            best_score = -1.0
+            for other in self.agents.values():
+                if other.id == agent.id or other.current_location != agent.current_location:
+                    continue
+                for d in desired_set:
+                    if other.inventory_count(d) > 0:
+                        score = self._support_score_for(agent, other.name)
+                        if score > best_score:
+                            best_score = score
+                            best_partner = other
+                            desired_item = d
+
+            if not best_partner or not desired_item:
                 continue
-            partner = partners[0]
-            if agent.current_location != partner.current_location:
-                continue
-            if agent.consume_inventory(surplus_item, 1) and partner.consume_inventory(desired, 1):
-                agent.inventory.append({"name": desired, "quantity": 1})
-                partner.inventory.append({"name": surplus_item, "quantity": 1})
-                trade = {
-                    "from_agent": agent.name,
-                    "to_agent": partner.name,
-                    "items_given": {surplus_item: 1},
-                    "items_received": {desired: 1},
-                    "item": desired,
-                    "value_guess": 1.0,
-                    "context": "barter",
-                    "tick": self.tick,
-                    "fairness": 1.0,
-                }
-                self.world.record_trade(trade)
-                agent.note_reciprocity(partner.name, gave={surplus_item: 1}, received={desired: 1})
-                partner.note_reciprocity(agent.name, gave={desired: 1}, received={surplus_item: 1})
-                agent.mental_models.update_from_interaction(partner.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
-                partner.mental_models.update_from_interaction(agent.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
-                agent.add_life_event(f"Traded {surplus_item.replace('_', ' ')} for {desired.replace('_', ' ')} with {partner.name}.", self.tick, category="trade", impact=0.35)
-                partner.add_life_event(f"Traded {desired.replace('_', ' ')} for {surplus_item.replace('_', ' ')} with {agent.name}.", self.tick, category="trade", impact=0.35)
-                events.append({"type": "transaction", "agentId": agent.id, "item": desired, "price": 1, "action": "buy"})
-                events.append({"type": "system_event", "eventType": "barter_trade", "label": "Barter", "description": f"{agent.name} traded {surplus_item.replace('_', ' ')} for {desired.replace('_', ' ')} with {partner.name}."})
+
+            # Use economy system to figure out a fair exchange rate
+            rate = self.economy.get_suggested_rate(surplus_item, desired_item, self.time_manager.season)
+            give_qty = 1
+            recv_qty = max(1, round(rate))
+
+            trade_events = self._execute_trade(agent, best_partner, surplus_item, give_qty, desired_item, recv_qty)
+            events.extend(trade_events)
+
+        # Periodically detect if a currency is emerging
+        if self.tick % 100 == 0:
+            self.economy.detect_currency()
+            if self.economy.currency_item and self.economy.currency_adoption > 0.5:
+                currency_name = self.economy.currency_item.replace("_", " ")
+                if not self.world.constitution.economic_rules.get("currency"):
+                    self.world.constitution.economic_rules["currency"] = currency_name
+                    self.world.constitution.change_history.append({
+                        "tick": self.tick,
+                        "type": "currency_emerged",
+                        "description": f"{currency_name} has become the de facto currency",
+                    })
+                    events.append({
+                        "type": "system_event",
+                        "eventType": "currency_emerged",
+                        "label": "Currency!",
+                        "description": f"The settlers have begun using {currency_name} as a common medium of exchange.",
+                    })
+                    self._add_story_highlight("milestone", f"{currency_name} emerged as currency", None, None)
+
         return events
+
+    def _resolve_trade_intentions(self) -> list[dict]:
+        """Find matching trade intentions from conversations and execute the swaps."""
+        events = []
+        # Collect all active trade intentions
+        trade_agents: list[tuple[AgentV2, dict]] = []
+        for agent in self.agents.values():
+            for intention in agent.active_intentions:
+                if intention.get("source") != "trade" or intention.get("status") != "active":
+                    continue
+                trade_agents.append((agent, intention))
+
+        # Try to match pairs that are co-located
+        matched = set()
+        for i, (agent_a, intent_a) in enumerate(trade_agents):
+            if id(intent_a) in matched:
+                continue
+            partner_name = intent_a.get("trade_details", {}).get("partner")
+            if not partner_name:
+                continue
+            # Find the partner's matching intention
+            for j, (agent_b, intent_b) in enumerate(trade_agents):
+                if i == j or id(intent_b) in matched:
+                    continue
+                if agent_b.name != partner_name:
+                    continue
+                if agent_a.current_location != agent_b.current_location:
+                    continue
+                # Both are co-located with matching trade intentions - execute
+                # Parse what each has to offer: give surplus, get what's needed
+                give_item, recv_item = self._pick_trade_items(agent_a, agent_b)
+                if give_item and recv_item:
+                    rate = self.economy.get_suggested_rate(give_item, recv_item, self.time_manager.season)
+                    give_qty = 1
+                    recv_qty = max(1, round(rate))
+                    trade_events = self._execute_trade(agent_a, agent_b, give_item, give_qty, recv_item, recv_qty, context="negotiated")
+                    events.extend(trade_events)
+
+                # Mark intentions as completed
+                intent_a["status"] = "completed"
+                intent_b["status"] = "completed"
+                matched.add(id(intent_a))
+                matched.add(id(intent_b))
+                break
+
+        return events
+
+    def _pick_trade_items(self, agent_a: AgentV2, agent_b: AgentV2) -> tuple[str | None, str | None]:
+        """Pick the best items for a trade between two agents based on needs and surplus."""
+        from systems.economy import FOOD_ITEMS, BUILDING_ITEMS
+
+        a_needs_food = agent_a.drives.hunger > 0.3
+        a_needs_building = agent_a.drives.shelter_need > 0.3
+        b_needs_food = agent_b.drives.hunger > 0.3
+        b_needs_building = agent_b.drives.shelter_need > 0.3
+
+        # What does A have that B wants?
+        a_give = None
+        if b_needs_food:
+            for item in FOOD_ITEMS:
+                if agent_a.inventory_count(item) > 0:
+                    a_give = item
+                    break
+        if not a_give and b_needs_building:
+            for item in BUILDING_ITEMS:
+                if agent_a.inventory_count(item) > 0:
+                    a_give = item
+                    break
+        if not a_give:
+            # Give whatever we have most of
+            best_item, best_qty = None, 0
+            for inv_item in agent_a.inventory:
+                name = inv_item.get("name", "")
+                qty = int(inv_item.get("quantity", 1))
+                if qty > best_qty:
+                    best_item, best_qty = name, qty
+            a_give = best_item
+
+        # What does B have that A wants?
+        b_give = None
+        if a_needs_food:
+            for item in FOOD_ITEMS:
+                if agent_b.inventory_count(item) > 0:
+                    b_give = item
+                    break
+        if not b_give and a_needs_building:
+            for item in BUILDING_ITEMS:
+                if agent_b.inventory_count(item) > 0:
+                    b_give = item
+                    break
+        if not b_give:
+            best_item, best_qty = None, 0
+            for inv_item in agent_b.inventory:
+                name = inv_item.get("name", "")
+                qty = int(inv_item.get("quantity", 1))
+                if qty > best_qty:
+                    best_item, best_qty = name, qty
+            b_give = best_item
+
+        if a_give and b_give and a_give != b_give:
+            return a_give, b_give
+        return None, None
 
     def _get_active_schedule_step(self, agent: AgentV2) -> dict | None:
         if not agent.daily_schedule:
@@ -1534,6 +1744,24 @@ class SimulationEngineV2:
                 agent.working_memory.set_worry("I couldn't follow through on that building plan.")
                 self._note_plan_outcome(agent, False, "commitment", "I let a building promise slip because I wasn't ready.")
                 events.append({"type": "system_event", "eventType": "plan_failed", "label": "Missed Plan", "description": f"{agent.name} could not follow through on the building plan."})
+        elif kind in ("barter_offer", "offer"):
+            # Find the trade partner and try to execute
+            partner_names = commitment.get("with", [])
+            partner = next((a for a in self.agents.values() if a.name in partner_names and a.current_location == location), None)
+            if partner:
+                give_item, recv_item = self._pick_trade_items(agent, partner)
+                if give_item and recv_item:
+                    rate = self.economy.get_suggested_rate(give_item, recv_item, self.time_manager.season)
+                    trade_events = self._execute_trade(agent, partner, give_item, 1, recv_item, max(1, round(rate)), context="negotiated")
+                    events.extend(trade_events)
+                    commitment["status"] = "completed"
+                    self._note_plan_outcome(agent, True, "trade", f"Completed a trade with {partner.name}.")
+                else:
+                    commitment["status"] = "failed"
+                    self._note_plan_outcome(agent, False, "trade", "We couldn't find a good trade to make.")
+            else:
+                # Partner isn't here yet, keep waiting
+                pass
         elif kind == "proposal":
             result = self._apply_proposal(agent, commitment)
             if result:
@@ -1745,7 +1973,7 @@ class SimulationEngineV2:
             "agents": [a.to_dict() for a in self.agents.values()],
             "weather": self.time_manager.weather,
             "speed": self.speed,
-            "economy": {"prices": {}, "supply": {}, "treasury": 0, "totalTransactions": 0},
+            "economy": self.economy.to_dict(),
             "buildings": self.world.get_buildings_list(),
             "tileGrid": self.world.get_tile_grid(),
             "worldSummary": self.world.get_world_summary(),
@@ -1762,7 +1990,7 @@ class SimulationEngineV2:
             "tick": self.tick,
             "time": self.time_manager.to_dict(),
             "agents": [a.to_detail_dict() for a in self.agents.values()],
-            "economy": {"prices": {}, "supply": {}, "treasury": 0},
+            "economy": self.economy.to_dict(),
             "constitution": self.world.constitution.to_dict(),
             "storyHighlights": self.story_highlights[-50:],
             "dayRecaps": self.day_recaps[-30:],
