@@ -35,7 +35,7 @@ class SimulationEngine:
         self._save_task: asyncio.Task | None = None
         self._last_saved_tick = 0
         self.time_manager.tick_in_day = int(6.0 / 24.0 * TICKS_PER_DAY)
-        self._active_conversations = 0
+        self._live_conversations: dict = {}  # id -> LiveConversation
         self._last_morning_day = -1
         self._last_evening_day = -1
         self._init_agents()
@@ -2197,8 +2197,38 @@ class SimulationEngine:
 
     def _process_interactions(self) -> list[dict]:
         events = []
-        from systems.interactions import interaction_decider, lightweight, select_interaction_type, process_conversation_consequences, overhearing_system, INTERACTION_TYPES, CONVERSATION_RANGE, awareness_system
+        from systems.interactions import (
+            interaction_decider, lightweight, select_interaction_type,
+            overhearing_system, INTERACTION_TYPES, CONVERSATION_RANGE,
+            awareness_system, LiveConversation, should_join_conversation,
+        )
 
+        # Phase 0: check if nearby agents should join active conversations
+        for convo in list(self._live_conversations.values()):
+            if not convo.is_active or len(convo.participants) >= LiveConversation.MAX_PARTICIPANTS:
+                continue
+            # Find a representative position from participants
+            ref = convo.participants[0]
+            rx, ry = ref.position
+            for agent in self.agents.values():
+                if agent.is_in_conversation or agent.conversation_cooldown > 0:
+                    continue
+                if agent.current_action.value in ("walking", "sleeping"):
+                    continue
+                ax, ay = agent.position
+                dist = abs(ax - rx) + abs(ay - ry)
+                if dist > CONVERSATION_RANGE:
+                    continue
+                if should_join_conversation(agent, convo, dist):
+                    convo.add_participant(agent)
+                    agent.is_in_conversation = True
+                    agent.current_conversation_id = convo.id
+                    agent.pause_for_conversation(self.tick + 12)
+                    events.append({"type": "system_event", "eventType": "conversation_joined", "label": "Conversation", "description": f"{agent.name} joined the conversation with {', '.join(p.name for p in convo.participants if p.id != agent.id)}."})
+                    if len(convo.participants) >= LiveConversation.MAX_PARTICIPANTS:
+                        break
+
+        # Phase 1: find new interaction pairs
         social_candidates = [
             agent for agent in self.agents.values()
             if agent.current_action.value not in ("walking", "sleeping")
@@ -2236,57 +2266,101 @@ class SimulationEngine:
                     if p["agent"].id != target.id and p["can_overhear"]:
                         overhearing_system.process(p["agent"], [agent.name, target.name], speech, p["distance"])
             else:
-                if self._active_conversations >= 2:
+                if len(self._live_conversations) >= 3:
                     continue
+                convo = LiveConversation(agent, target, itype, reason, agent.current_location)
+                self._live_conversations[convo.id] = convo
                 agent.pause_for_conversation(self.tick + 12)
                 target.pause_for_conversation(self.tick + 12)
                 agent.is_in_conversation = True
                 target.is_in_conversation = True
+                agent.current_conversation_id = convo.id
+                target.current_conversation_id = convo.id
                 events.append({"type": "system_event", "eventType": "conversation_started", "label": "Conversation", "description": f"{agent.name} approached {target.name} to talk ({reason})."})
-                asyncio.create_task(self._run_conversation(agent, target, itype, reason))
+                asyncio.create_task(self._run_live_conversation(convo))
         return events
 
-    async def _run_conversation(self, agent, target, itype: str, reason: str):
-        from systems.interactions import Conversation, process_conversation_consequences
+    async def _run_live_conversation(self, convo):
+        from systems.interactions import process_conversation_consequences, should_leave_conversation, overhearing_system, CONVERSATION_RANGE
 
-        self._active_conversations += 1
         try:
-            agent.is_in_conversation = True
-            target.is_in_conversation = True
-            convo = Conversation(agent, target, itype, reason, agent.current_location)
+            initiator = convo.participants[0]
 
-            opening = await convo.generate_turn(agent, target)
+            # Opening turn
+            opening = await convo.generate_turn(initiator)
             if self._broadcast and opening.get("speech"):
-                await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "agent_speak", "agentId": agent.id, "targetId": target.id, "speech": opening["speech"]}], "agents": [a.to_dict() for a in self.agents.values()]}})
+                await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "agent_speak", "agentId": initiator.id, "conversationId": convo.id, "speech": opening["speech"]}], "agents": [a.to_dict() for a in self.agents.values()]}})
 
-            speakers = [target, agent]
-            current_speech = opening.get("speech", "")
-            for turn_idx in range(convo.max_turns):
-                speaker = speakers[turn_idx % 2]
-                listener = speakers[(turn_idx + 1) % 2]
-                result = await convo.generate_turn(speaker, listener, current_speech)
-                current_speech = result.get("speech", "")
-                if self._broadcast and current_speech:
-                    await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "agent_speak", "agentId": speaker.id, "targetId": listener.id, "speech": current_speech}], "agents": [a.to_dict() for a in self.agents.values()]}})
+            for _turn_idx in range(convo.max_turns):
+                if not convo.is_active or len(convo.participants) < 2:
+                    break
+
+                # Check for voluntary leaves (non-speaker participants)
+                for p in list(convo.participants):
+                    if should_leave_conversation(p, convo):
+                        convo.remove_participant(p)
+                        p.is_in_conversation = False
+                        p.current_conversation_id = None
+                        p.conversation_cooldown = 30
+                        p.talking_until_tick = max(p.talking_until_tick, self.tick + 6)
+                        if self._broadcast:
+                            await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "system_event", "eventType": "conversation_left", "label": "Conversation", "description": f"{p.name} left the conversation."}], "agents": [a.to_dict() for a in self.agents.values()]}})
+
+                if len(convo.participants) < 2:
+                    break
+
+                # Select next speaker and generate turn
+                speaker = convo.select_next_speaker()
+                if not speaker:
+                    break
+                result = await convo.generate_turn(speaker)
+                speech = result.get("speech", "")
+
+                if self._broadcast and speech:
+                    await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "agent_speak", "agentId": speaker.id, "conversationId": convo.id, "speech": speech}], "agents": [a.to_dict() for a in self.agents.values()]}})
+
+                # Handle speaker wanting to leave
+                if result.get("wants_to_leave") and len(convo.participants) > 2:
+                    convo.remove_participant(speaker)
+                    speaker.is_in_conversation = False
+                    speaker.current_conversation_id = None
+                    speaker.conversation_cooldown = 30
+                    speaker.talking_until_tick = max(speaker.talking_until_tick, self.tick + 6)
+                    continue
                 if not result.get("wants_to_continue", True):
                     break
 
+                # Overhearing for nearby non-participants
+                if speech:
+                    speaker_names = [p.name for p in convo.participants]
+                    sx, sy = speaker.position
+                    for other_id, other in self.agents.items():
+                        if any(p.id == other_id for p in convo.participants):
+                            continue
+                        ox, oy = other.position
+                        dist = abs(sx - ox) + abs(sy - oy)
+                        if dist <= CONVERSATION_RANGE + 1:
+                            overhearing_system.process(other, speaker_names, speech, dist, is_argument=(convo.interaction_type == "argument"))
+
+            # End: consequences for all remaining participants
             all_names = [a.name for a in self.agents.values()]
-            process_conversation_consequences(agent, target.name, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
-            process_conversation_consequences(target, agent.name, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
+            final_participants = list(convo.participants)
+            for agent in final_participants:
+                others = [p.name for p in final_participants if p.id != agent.id]
+                if others:
+                    process_conversation_consequences(agent, others, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
             if convo.structured_commitments:
                 description = convo.structured_commitments[-1]["description"]
-                self._add_story_highlight("new_goal", f"{agent.name} wants to: {description}", agent.id, agent.name)
+                self._add_story_highlight("new_goal", f"{final_participants[0].name} wants to: {description}", final_participants[0].id, final_participants[0].name)
         except Exception as e:
             logger.error("Conversation error: %s", e)
         finally:
-            agent.is_in_conversation = False
-            target.is_in_conversation = False
-            agent.talking_until_tick = max(agent.talking_until_tick, self.tick + 6)
-            target.talking_until_tick = max(target.talking_until_tick, self.tick + 6)
-            agent.conversation_cooldown = 30
-            target.conversation_cooldown = 30
-            self._active_conversations = max(0, self._active_conversations - 1)
+            for p in list(convo.participants):
+                p.is_in_conversation = False
+                p.current_conversation_id = None
+                p.talking_until_tick = max(p.talking_until_tick, self.tick + 6)
+                p.conversation_cooldown = 30
+            self._live_conversations.pop(convo.id, None)
 
     async def _process_inner_monologue_background(self):
         try:

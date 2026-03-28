@@ -142,6 +142,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
             agentId: event.agentId,
             text: event.speech,
             expires: Date.now() + 4000,  // 4 seconds
+            conversationId: event.conversationId,
           });
         }
       }

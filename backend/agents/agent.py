@@ -113,6 +113,7 @@ class Agent:
 
         self.is_in_conversation: bool = False
         self.conversation_cooldown: int = 0  # Ticks before agent can chat again
+        self.current_conversation_id: str | None = None
 
         # Initial working memory
         self.working_memory.push("We just arrived at this abandoned settlement.")
@@ -486,6 +487,7 @@ class Agent:
             "position": list(self.position),
             "currentLocation": self.current_location,
             "currentAction": self.current_action.value,
+            "conversationId": self.current_conversation_id,
             "emotion": self.emotion,
             "innerThought": self.inner_thought,
             "colorIndex": self.profile.color_index,
