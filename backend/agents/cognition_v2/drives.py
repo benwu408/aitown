@@ -24,12 +24,12 @@ class DriveSystem:
         # Hunger — increases constantly, faster when working
         self.hunger = min(1.0, self.hunger + 0.002 + (0.001 if is_working else 0))
 
-        # Rest — increases during activity, decreases during sleep
+        # Rest — tiredness builds during activity, recovers during sleep
         if is_sleeping:
-            self.rest = max(0.0, self.rest - 0.01)
+            self.rest = max(0.0, self.rest - 0.005)
             self.hunger = min(1.0, self.hunger + 0.0005)
         else:
-            self.rest = min(1.0, self.rest + 0.001 + (0.002 if is_working else 0))
+            self.rest = min(1.0, self.rest + 0.0004 + (0.0008 if is_working else 0))
 
         # Social need — increases when alone
         if is_alone:
