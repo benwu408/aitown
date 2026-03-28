@@ -1,308 +1,600 @@
-"""Mutable world grid — the single source of truth for the town map."""
+"""Open-ended world — zero-building wilderness with emergent settlement growth."""
 
 import heapq
-import json
 import logging
-from dataclasses import dataclass, field
+import random
 
 logger = logging.getLogger("agentica.world")
 
 MAP_SIZE = 40
 
-# Structure costs
-STRUCTURE_COSTS = {
-    "house": {"coins": 150, "tools": 5},
-    "bakery": {"coins": 200, "tools": 8},
-    "workshop": {"coins": 300, "tools": 10},
-    "general_store": {"coins": 250, "tools": 8},
-    "tavern": {"coins": 250, "tools": 8},
-    "clinic": {"coins": 400, "tools": 15},
-    "school": {"coins": 300, "tools": 10},
-    "church": {"coins": 350, "tools": 12},
-    "barn": {"coins": 100, "tools": 5},
-    "market_stall": {"coins": 80, "tools": 3},
+LOCATIONS = {
+    "clearing": {
+        "type": "open_space",
+        "label": "Clearing",
+        "description": "A broad clearing where everyone arrived. It is the only obviously communal place.",
+        "col": 17,
+        "row": 17,
+        "width": 6,
+        "height": 5,
+        "capacity": 30,
+        "resources": [],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "north_fields": {
+        "type": "open_land",
+        "label": "North Fields",
+        "description": "Fertile ground with wild edible plants and tall grass.",
+        "col": 10,
+        "row": 4,
+        "width": 8,
+        "height": 5,
+        "capacity": 12,
+        "resources": ["wild_plants", "wild_grass", "soil"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "east_meadow": {
+        "type": "open_land",
+        "label": "East Meadow",
+        "description": "A broad meadow full of flowers, shrubs, and scattered berry bushes.",
+        "col": 28,
+        "row": 12,
+        "width": 7,
+        "height": 6,
+        "capacity": 12,
+        "resources": ["wild_berries", "wild_plants"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "forest_edge": {
+        "type": "natural",
+        "label": "Forest Edge",
+        "description": "Dense woodland packed with trees, berries, herbs, and fallen branches.",
+        "col": 3,
+        "row": 3,
+        "width": 9,
+        "height": 10,
+        "capacity": 16,
+        "resources": ["wood", "wild_berries", "wild_herbs", "stone"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "river": {
+        "type": "water",
+        "label": "River",
+        "description": "A river on the western side with water, fish, and soft clay banks.",
+        "col": 2,
+        "row": 13,
+        "width": 4,
+        "height": 17,
+        "capacity": 10,
+        "resources": ["fresh_water", "fish", "clay"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "berry_grove": {
+        "type": "natural",
+        "label": "Berry Grove",
+        "description": "A small grove thick with berry bushes and herbs.",
+        "col": 22,
+        "row": 24,
+        "width": 5,
+        "height": 4,
+        "capacity": 8,
+        "resources": ["wild_berries", "wild_herbs"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "south_field": {
+        "type": "open_space",
+        "label": "South Field",
+        "description": "A wide southern grassland with room to gather or build later.",
+        "col": 12,
+        "row": 31,
+        "width": 10,
+        "height": 5,
+        "capacity": 20,
+        "resources": ["wild_grass"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "hill_overlook": {
+        "type": "natural",
+        "label": "Hill Overlook",
+        "description": "A rocky northern hill with loose stone and mineral veins.",
+        "col": 27,
+        "row": 2,
+        "width": 5,
+        "height": 4,
+        "capacity": 8,
+        "resources": ["stone", "minerals"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
+    "pond": {
+        "type": "water",
+        "label": "Pond",
+        "description": "A small freshwater pond with reeds, fish, and muddy edges.",
+        "col": 33,
+        "row": 27,
+        "width": 4,
+        "height": 4,
+        "capacity": 6,
+        "resources": ["fresh_water", "fish"],
+        "claimed_by": None,
+        "designated_purpose": None,
+    },
 }
 
-DECORATION_COSTS = {
-    "tree": 5, "flower": 2, "bench": 10, "fence": 3, "rock": 0, "lantern": 8,
+RESOURCES = {
+    "wood": {"locations": ["forest_edge"], "quantity": 240, "renewable": True, "regen_rate": 2},
+    "stone": {"locations": ["forest_edge", "hill_overlook"], "quantity": 180, "renewable": False, "regen_rate": 0},
+    "wild_berries": {"locations": ["forest_edge", "east_meadow", "berry_grove"], "quantity": 140, "renewable": True, "regen_rate": 6},
+    "wild_plants": {"locations": ["north_fields", "east_meadow"], "quantity": 120, "renewable": True, "regen_rate": 5},
+    "fish": {"locations": ["river", "pond"], "quantity": 70, "renewable": True, "regen_rate": 3},
+    "fresh_water": {"locations": ["river", "pond"], "quantity": 999, "renewable": True, "regen_rate": 999},
+    "clay": {"locations": ["river"], "quantity": 120, "renewable": False, "regen_rate": 0},
+    "wild_herbs": {"locations": ["forest_edge", "berry_grove"], "quantity": 50, "renewable": True, "regen_rate": 2},
+    "wild_grass": {"locations": ["north_fields", "south_field"], "quantity": 200, "renewable": True, "regen_rate": 8},
+    "minerals": {"locations": ["hill_overlook"], "quantity": 60, "renewable": False, "regen_rate": 0},
+    "soil": {"locations": ["north_fields"], "quantity": 999, "renewable": True, "regen_rate": 999},
 }
 
 
-@dataclass
-class BuildingDef:
-    id: str
-    label: str
-    col: int
-    row: int
-    width: int
-    height: int
-    entry_col: int = 0
-    entry_row: int = 0
-    owner: str = ""
-    building_type: str = ""
+class WorldConstitution:
+    """Living rules of the simulation. Starts blank."""
 
-    def __post_init__(self):
-        if self.entry_col == 0 and self.entry_row == 0:
-            self.entry_col = self.col + self.width // 2
-            self.entry_row = self.row + self.height
+    def __init__(self):
+        self.economic_rules = {"currency": None, "trade_rules": [], "property_rules": [], "taxation": None}
+        self.governance_rules = {"system": None, "leaders": [], "laws": [], "enforcement_mechanism": None}
+        self.social_norms: list[dict] = []
+        self.institutions: list[dict] = []
+        self.change_history: list[dict] = []
 
+    def summary(self) -> str:
+        parts = []
+        if self.economic_rules["currency"]:
+            parts.append(f"Currency: {self.economic_rules['currency']}")
+        if self.governance_rules.get("informal_leader"):
+            parts.append(f"Leader: {self.governance_rules['informal_leader']}")
+        elif self.governance_rules["leaders"]:
+            parts.append(f"Leaders: {', '.join(self.governance_rules['leaders'])}")
+        if self.governance_rules["laws"]:
+            parts.append(f"Laws: {'; '.join(self.governance_rules['laws'][:3])}")
+        if self.social_norms:
+            norm_labels = [n["text"] if isinstance(n, dict) else str(n) for n in self.social_norms[:3]]
+            parts.append(f"Norms: {'; '.join(norm_labels)}")
+        if self.institutions:
+            parts.append(f"Institutions: {', '.join(i['name'] for i in self.institutions[:3])}")
+        return "\n".join(parts) if parts else "No rules established yet. This place is still completely unsettled."
 
-# Default buildings (seed layout for fresh starts)
-DEFAULT_BUILDINGS = [
-    BuildingDef("town_hall", "Town Hall", 18, 18, 3, 3, building_type="town_hall"),
-    BuildingDef("general_store", "General Store", 22, 22, 3, 2, building_type="general_store"),
-    BuildingDef("farm", "Farm", 6, 6, 4, 4, entry_col=8, entry_row=10, building_type="farm"),
-    BuildingDef("barn", "Barn", 11, 8, 2, 2, building_type="barn"),
-    BuildingDef("bakery", "Bakery", 25, 20, 2, 2, building_type="bakery"),
-    BuildingDef("workshop", "Workshop", 14, 24, 3, 2, building_type="workshop"),
-    BuildingDef("tavern", "Tavern", 22, 26, 3, 2, building_type="tavern"),
-    BuildingDef("school", "School", 28, 24, 2, 2, building_type="school"),
-    BuildingDef("church", "Church", 26, 16, 2, 3, building_type="church"),
-    BuildingDef("house_1", "Eleanor's House", 14, 14, 2, 2, owner="eleanor", building_type="house"),
-    BuildingDef("house_2", "John's House", 10, 12, 2, 2, owner="john", building_type="house"),
-    BuildingDef("house_3", "Kowalski House", 16, 28, 2, 2, owner="tom", building_type="house"),
-    BuildingDef("house_4", "Reeves House", 30, 20, 2, 2, owner="marcus", building_type="house"),
-    BuildingDef("house_5", "Brennan House", 12, 20, 2, 2, owner="henry", building_type="house"),
-    BuildingDef("house_6", "Others House", 30, 28, 2, 2, building_type="house"),
-    BuildingDef("park", "Park", 18, 12, 3, 2, entry_col=19, entry_row=14, building_type="park"),
-    BuildingDef("pond", "Pond", 8, 32, 3, 3, entry_col=9, entry_row=31, building_type="pond"),
-]
+    def to_dict(self) -> dict:
+        return {
+            "economic": self.economic_rules,
+            "governance": self.governance_rules,
+            "norms": self.social_norms,
+            "institutions": self.institutions,
+            "history": self.change_history[-40:],
+        }
 
-BUILDING_MAP = {b.id: b for b in DEFAULT_BUILDINGS}
+    def load_from_dict(self, data: dict):
+        if data.get("economic"):
+            self.economic_rules = data["economic"]
+        if data.get("governance"):
+            self.governance_rules = data["governance"]
+        if data.get("norms"):
+            self.social_norms = data["norms"]
+        if data.get("institutions"):
+            self.institutions = data["institutions"]
+        if data.get("history"):
+            self.change_history = data["history"]
 
 
 class World:
+    _next_building_id: int = 1
+
     def __init__(self):
         self.width = MAP_SIZE
         self.height = MAP_SIZE
-        self.buildings: list[BuildingDef] = list(DEFAULT_BUILDINGS)
-        self.building_map: dict[str, BuildingDef] = dict(BUILDING_MAP)
-        self._next_building_id = 100
-
-        # Mutable tile grid — each tile is a dict
-        self.tiles: list[list[dict]] = self._generate_default_grid()
+        self.locations = {k: dict(v) for k, v in LOCATIONS.items()}
+        self.resources = {k: dict(v) for k, v in RESOURCES.items()}
+        self.constitution = WorldConstitution()
+        self.created_objects: list[dict] = []
+        self.trades: list[dict] = []
+        self.active_proposals: list[dict] = []
+        self.meetings: list[dict] = []
+        self.coalitions: list[dict] = []
+        self.norm_violations: list[dict] = []
+        self.projects: list[dict] = []
+        self.tile_resource_state: dict[str, dict[str, int]] = {}
+        self.tiles: list[list[dict]] = []
         self._path_cache: dict = {}
-        self._pending_changes: list[dict] = []
+        self._generate_world()
 
-    def _generate_default_grid(self) -> list[list[dict]]:
-        """Generate the default town layout."""
-        grid = []
-        # Pre-compute building tiles
-        building_tiles: dict[str, str] = {}
-        for b in self.buildings:
-            for dc in range(b.width):
-                for dr in range(b.height):
-                    building_tiles[f"{b.col + dc},{b.row + dr}"] = b.id
+    def _generate_world(self):
+        self.tiles = []
+        self.tile_resource_state = {}
 
-        # Generate paths
-        paths = self._generate_default_paths()
-
-        # Tree and flower spots (from original)
-        tree_spots = {f"{c},{r}" for c, r in [
-            (3,3),(5,15),(7,28),(13,5),(16,10),(24,8),(32,10),(35,15),(33,25),
-            (36,30),(4,35),(15,35),(25,5),(30,5),(35,8),(2,20),(37,20),(10,30),
-            (22,10),(28,12),(32,16),(6,25),(34,22),(17,7),(26,32),(12,34),(33,33),
-            (3,10),(38,12),(5,38),
-        ]}
-        flower_spots = {f"{c},{r}" for c, r in [
-            (17,12),(19,12),(21,12),(19,20),(21,20),(15,16),(16,16),(27,15),(28,15),
-        ]}
+        loc_tiles: dict[str, str] = {}
+        for loc_id, loc in self.locations.items():
+            for dc in range(loc["width"]):
+                for dr in range(loc["height"]):
+                    loc_tiles[f"{loc['col'] + dc},{loc['row'] + dr}"] = loc_id
 
         for row in range(MAP_SIZE):
             tile_row = []
             for col in range(MAP_SIZE):
                 key = f"{col},{row}"
-                bid = building_tiles.get(key)
-                is_path = key in paths
-                is_tree = key in tree_spots
-                is_flower = key in flower_spots
+                loc_id = loc_tiles.get(key)
+                tile = {
+                    "col": col,
+                    "row": row,
+                    "type": "grass",
+                    "structure": None,
+                    "decoration": None,
+                    "walkable": True,
+                    "resourceHints": [],
+                    "resourceState": {},
+                }
 
-                tile: dict = {"col": col, "row": row, "type": "grass", "structure": None, "decoration": None, "walkable": True}
+                if loc_id:
+                    loc = self.locations[loc_id]
+                    ltype = loc["type"]
+                    if ltype == "water":
+                        tile["type"] = "water"
+                        tile["walkable"] = col in (loc["col"], loc["col"] + loc["width"] - 1)
+                        tile["decoration"] = "reed" if random.random() < 0.15 else None
+                    elif ltype == "open_land":
+                        tile["type"] = "dirt"
+                        if random.random() < 0.18:
+                            tile["decoration"] = "flower"
+                    elif ltype == "open_space":
+                        tile["type"] = "grass"
+                        if random.random() < 0.08:
+                            tile["decoration"] = "flower"
+                    else:
+                        tile["type"] = "dark_grass"
+                        if random.random() < 0.45:
+                            tile["decoration"] = "tree"
+                            tile["walkable"] = False
+                        elif random.random() < 0.18:
+                            tile["decoration"] = "flower"
 
-                if bid:
-                    b = self.building_map.get(bid)
-                    if b:
-                        if b.building_type == "pond":
-                            tile["type"] = "water"
-                            tile["walkable"] = False
-                        elif b.building_type == "farm":
-                            tile["type"] = "dirt"
-                        elif b.building_type == "park":
-                            tile["type"] = "dark_grass"
-                        else:
-                            tile["walkable"] = False
-                        tile["structure"] = {
-                            "building_id": bid,
-                            "type": b.building_type,
-                            "label": b.label,
-                            "owner": b.owner,
-                        }
-                elif is_path:
-                    tile["type"] = "path"
-                elif is_tree and not bid:
-                    tile["decoration"] = "tree"
-                    tile["walkable"] = False
-                elif is_flower and not bid:
-                    tile["type"] = "flowers"
-                    tile["decoration"] = "flower"
-                elif ((col * 7 + row * 13) % 100) < 5:
-                    tile["type"] = "dark_grass"
+                    tile["resourceHints"] = list(loc.get("resources", []))
+                else:
+                    roll = random.random()
+                    if roll < 0.03:
+                        tile["decoration"] = "tree"
+                        tile["walkable"] = False
+                    elif roll < 0.045:
+                        tile["decoration"] = "flower"
+                    elif roll < 0.06:
+                        tile["type"] = "dark_grass"
 
                 tile_row.append(tile)
-            grid.append(tile_row)
-        return grid
+            self.tiles.append(tile_row)
 
-    def _generate_default_paths(self) -> set[str]:
-        paths = set()
-        def add_path(fc, fr, tc, tr):
-            c, r = fc, fr
-            while c != tc:
-                paths.add(f"{c},{r}")
-                c += 1 if c < tc else -1
-            while r != tr:
-                paths.add(f"{c},{r}")
-                r += 1 if r < tr else -1
-            paths.add(f"{tc},{tr}")
+        self._rebuild_tile_resource_state()
+        self._apply_structures_to_tiles()
+        self._path_cache.clear()
 
-        for c in range(4, 35):
-            paths.add(f"{c},21")
-        for r in range(4, 35):
-            paths.add(f"20,{r}")
+    def _rebuild_tile_resource_state(self):
+        self.tile_resource_state = {}
+        for loc_id, loc in self.locations.items():
+            if loc.get("type") not in ("natural", "open_land", "open_space"):
+                continue
+            resources = loc.get("resources", [])
+            for dc in range(loc["width"]):
+                for dr in range(loc["height"]):
+                    col = loc["col"] + dc
+                    row = loc["row"] + dr
+                    tile = self.tiles[row][col]
+                    tile_key = f"{col},{row}"
+                    tile_state: dict[str, int] = {}
+                    if "wood" in resources and tile.get("decoration") == "tree":
+                        tile_state["wood"] = 3
+                    if "wild_berries" in resources and (tile.get("decoration") == "flower" or random.random() < 0.25):
+                        tile_state["wild_berries"] = 2
+                    if "wild_herbs" in resources and random.random() < 0.2:
+                        tile_state["wild_herbs"] = 1
+                    if "wild_plants" in resources and tile["type"] in ("dirt", "grass") and random.random() < 0.35:
+                        tile_state["wild_plants"] = 1
+                    if tile_state:
+                        self.tile_resource_state[tile_key] = tile_state
 
-        add_path(19,19,20,21); add_path(23,22,23,21); add_path(8,10,8,21)
-        add_path(12,9,12,21); add_path(26,21,26,21); add_path(15,25,15,21)
-        add_path(23,27,23,21); add_path(29,25,29,21); add_path(27,18,27,21)
-        add_path(15,15,15,21); add_path(11,13,11,21); add_path(17,29,20,29)
-        add_path(31,21,31,21); add_path(13,21,13,21); add_path(31,29,31,21)
-        add_path(19,13,20,13); add_path(9,33,9,21); add_path(15,21,15,15)
-        add_path(23,21,23,27); add_path(20,13,20,8)
-        return paths
+        # Second pass: any tree tile on the map gets wood=3 (all trees are harvestable)
+        for r_idx, tile_row in enumerate(self.tiles):
+            for c_idx, tile in enumerate(tile_row):
+                if tile.get("decoration") != "tree":
+                    continue
+                tile_key = f"{c_idx},{r_idx}"
+                if tile_key not in self.tile_resource_state:
+                    self.tile_resource_state[tile_key] = {"wood": 3}
+                elif "wood" not in self.tile_resource_state[tile_key]:
+                    self.tile_resource_state[tile_key]["wood"] = 3
+                if "wood" not in tile.get("resourceHints", []):
+                    tile.setdefault("resourceHints", []).append("wood")
 
-    # --- Tile access ---
-    def get_tile(self, col: int, row: int) -> dict | None:
-        if 0 <= col < self.width and 0 <= row < self.height:
-            return self.tiles[row][col]
-        return None
+        # Sync global wood quantity to match actual wood on tiles
+        total_wood = sum(state.get("wood", 0) for state in self.tile_resource_state.values())
+        self.resources["wood"]["quantity"] = total_wood
+
+        self._sync_tile_resource_visuals()
+
+    def _sync_tile_resource_visuals(self):
+        for row in self.tiles:
+            for tile in row:
+                tile["resourceState"] = {}
+                if tile.get("decoration") == "stump":
+                    tile["decoration"] = None
+        for key, state in self.tile_resource_state.items():
+            col, row = map(int, key.split(","))
+            if not (0 <= row < self.height and 0 <= col < self.width):
+                continue
+            tile = self.tiles[row][col]
+            tile["resourceState"] = dict(state)
+            if state.get("wood", 0) > 0:
+                tile["decoration"] = "tree"
+                tile["walkable"] = False
+            elif "wood" in tile.get("resourceHints", []):
+                tile["decoration"] = "stump"
+                tile["walkable"] = True
+
+    def _apply_structures_to_tiles(self):
+        for loc_id, loc in self.locations.items():
+            if loc.get("type") != "built_structure":
+                continue
+            for dc in range(loc["width"]):
+                for dr in range(loc["height"]):
+                    col = loc["col"] + dc
+                    row = loc["row"] + dr
+                    tile = self.tiles[row][col]
+                    tile["structure"] = {
+                        "building_id": loc_id,
+                        "type": "built_structure",
+                        "label": loc.get("label", loc_id),
+                        "owner": loc.get("claimed_by", ""),
+                    }
+                    tile["walkable"] = False
+                    tile["decoration"] = None
+                    tile["resourceState"] = {}
+                    tile["type"] = "dirt"
+                    self.tile_resource_state.pop(f"{col},{row}", None)
+
+    def _update_tile_after_resource_gather(self, location: str, resource: str):
+        if resource != "wood":
+            return
+        loc = self.locations.get(location)
+        if not loc:
+            return
+        tree_tiles = []
+        for dc in range(loc["width"]):
+            for dr in range(loc["height"]):
+                col = loc["col"] + dc
+                row = loc["row"] + dr
+                state = self.tile_resource_state.get(f"{col},{row}", {})
+                if state.get("wood", 0) > 0:
+                    tree_tiles.append((col, row, state["wood"]))
+        if not tree_tiles:
+            return
+        col, row, remaining = random.choice(tree_tiles)
+        state = self.tile_resource_state[f"{col},{row}"]
+        state["wood"] = max(0, remaining - 1)
+        tile = self.tiles[row][col]
+        if state["wood"] == 0:
+            del state["wood"]
+            tile["decoration"] = "stump"
+            tile["walkable"] = True
+        tile["resourceState"] = dict(state)
+        if not state:
+            self.tile_resource_state.pop(f"{col},{row}", None)
+            tile["resourceState"] = {}
+            if "wood" in tile.get("resourceHints", []):
+                tile["decoration"] = "stump"
+
+    def _regen_tile_resources(self):
+        for loc_id, loc in self.locations.items():
+            if loc.get("type") not in ("natural", "open_land", "open_space"):
+                continue
+            if self.resources["wood"]["quantity"] >= RESOURCES["wood"]["quantity"]:
+                break
+            for dc in range(loc["width"]):
+                for dr in range(loc["height"]):
+                    if random.random() > 0.01:
+                        continue
+                    col = loc["col"] + dc
+                    row = loc["row"] + dr
+                    tile = self.tiles[row][col]
+                    tile_key = f"{col},{row}"
+                    if tile["structure"] or tile["decoration"] == "tree":
+                        continue
+                    if tile["type"] == "dark_grass":
+                        tile["decoration"] = "tree"
+                        tile["walkable"] = False
+                        self.tile_resource_state.setdefault(tile_key, {})["wood"] = 2
+                        tile["resourceState"] = dict(self.tile_resource_state[tile_key])
+                        return
+
+    def get_location(self, loc_id: str) -> dict | None:
+        return self.locations.get(loc_id)
+
+    def add_proposal(self, proposal: dict) -> dict:
+        self.active_proposals = [p for p in self.active_proposals if p.get("id") != proposal.get("id")]
+        self.active_proposals.append(proposal)
+        return proposal
+
+    def upsert_meeting(self, meeting: dict) -> dict:
+        self.meetings = [m for m in self.meetings if m.get("id") != meeting.get("id")]
+        self.meetings.append(meeting)
+        return meeting
+
+    def upsert_project(self, project: dict) -> dict:
+        self.projects = [p for p in self.projects if p.get("id") != project.get("id")]
+        self.projects.append(project)
+        return project
+
+    def record_trade(self, trade: dict):
+        self.trades.append(trade)
+        self.trades = self.trades[-120:]
+
+    def add_norm_violation(self, violation: dict):
+        self.norm_violations.append(violation)
+        self.norm_violations = self.norm_violations[-80:]
+        norm_text = violation.get("norm")
+        if not norm_text:
+            return
+        for norm in self.constitution.social_norms:
+            if (norm["text"] if isinstance(norm, dict) else str(norm)) != norm_text:
+                continue
+            if isinstance(norm, dict):
+                norm["violations"] = int(norm.get("violations", 0)) + 1
+                history = norm.setdefault("history", [])
+                history.append({
+                    "tick": violation.get("tick", 0),
+                    "type": "violation",
+                    "description": violation.get("description", ""),
+                })
+                norm["history"] = history[-10:]
+                norm["strength"] = round(max(0.1, float(norm.get("strength", 0.55)) - 0.03), 2)
+            break
+
+    def add_norm(self, text: str, tick: int, category: str = "social", origin: str = "emergent", scope: str = "settlement") -> dict:
+        existing = next((n for n in self.constitution.social_norms if (n["text"] if isinstance(n, dict) else n) == text), None)
+        if existing:
+            if isinstance(existing, dict):
+                existing["strength"] = round(min(1.0, existing.get("strength", 0.5) + 0.05), 2)
+                history = existing.setdefault("history", [])
+                history.append({"tick": tick, "type": "reaffirmed", "description": text})
+                existing["history"] = history[-10:]
+            return existing if isinstance(existing, dict) else {"text": existing}
+        norm = {
+            "id": f"norm_{len(self.constitution.social_norms) + 1}",
+            "text": text,
+            "category": category,
+            "origin": origin,
+            "strength": 0.55,
+            "scope": scope,
+            "recognized_by": [],
+            "violations": 0,
+            "created_tick": tick,
+            "status": "active",
+            "history": [{"tick": tick, "type": "created", "description": text}],
+        }
+        self.constitution.social_norms.append(norm)
+        return norm
+
+    def recognize_norm(self, text: str, agent_name: str, amount: float = 0.02):
+        for norm in self.constitution.social_norms:
+            if (norm["text"] if isinstance(norm, dict) else str(norm)) != text:
+                continue
+            if isinstance(norm, dict):
+                if agent_name and agent_name not in norm["recognized_by"]:
+                    norm["recognized_by"].append(agent_name)
+                norm["strength"] = round(min(1.0, float(norm.get("strength", 0.55)) + amount), 2)
+            return
+
+    def get_location_entry(self, loc_id: str) -> tuple[int, int]:
+        loc = self.locations.get(loc_id)
+        if not loc:
+            return (20, 20)
+        if loc["type"] == "water":
+            return (loc["col"] + loc["width"], loc["row"] + loc["height"] // 2)
+        return (loc["col"] + loc["width"] // 2, min(self.height - 1, loc["row"] + loc["height"]))
+
+    def get_locations_with_resource(self, resource: str) -> list[str]:
+        res = self.resources.get(resource)
+        if not res:
+            return []
+        locs = res["locations"]
+        return locs if isinstance(locs, list) else [locs]
+
+    def get_resources_at(self, loc_id: str) -> list[str]:
+        loc = self.locations.get(loc_id)
+        if not loc:
+            return []
+        available = []
+        for resource in loc.get("resources", []):
+            if self.resources.get(resource, {}).get("quantity", 0) > 0:
+                available.append(resource)
+        return available
+
+    def get_all_location_ids(self) -> list[str]:
+        return list(self.locations.keys())
+
+    def get_unclaimed_buildings(self) -> list[str]:
+        return [
+            loc_id
+            for loc_id, loc in self.locations.items()
+            if loc.get("type") == "built_structure" and not loc.get("claimed_by")
+        ]
+
+    def claim_location(self, loc_id: str, agent_name: str, purpose: str = "") -> bool:
+        loc = self.locations.get(loc_id)
+        if not loc or loc.get("claimed_by"):
+            return False
+        loc["claimed_by"] = agent_name
+        loc["designated_purpose"] = purpose
+        logger.info("%s claimed %s for %s", agent_name, loc_id, purpose or "personal use")
+        return True
+
+    def _location_has_wood(self, location: str) -> bool:
+        loc = self.locations.get(location)
+        if not loc:
+            return False
+        for dc in range(loc["width"]):
+            for dr in range(loc["height"]):
+                key = f"{loc['col'] + dc},{loc['row'] + dr}"
+                if self.tile_resource_state.get(key, {}).get("wood", 0) > 0:
+                    return True
+        return False
+
+    def gather_resource(self, resource: str, amount: int, location: str) -> int:
+        res = self.resources.get(resource)
+        if not res:
+            return 0
+        locs = res["locations"] if isinstance(res["locations"], list) else [res["locations"]]
+        if location not in locs:
+            # Allow wood gathering at any location that has trees
+            if resource == "wood" and self._location_has_wood(location):
+                pass
+            else:
+                return 0
+        gathered = min(amount, res["quantity"])
+        if gathered <= 0:
+            return 0
+        res["quantity"] -= gathered
+        self._update_tile_after_resource_gather(location, resource)
+        return gathered
+
+    def regenerate_resources(self):
+        for resource, state in self.resources.items():
+            if state["renewable"] and state["quantity"] < RESOURCES[resource]["quantity"]:
+                state["quantity"] = min(RESOURCES[resource]["quantity"], state["quantity"] + state["regen_rate"])
+        self._regen_tile_resources()
+        self._sync_tile_resource_visuals()
 
     def is_walkable(self, col: int, row: int) -> bool:
         if 0 <= col < self.width and 0 <= row < self.height:
             return self.tiles[row][col]["walkable"]
         return False
 
-    # --- Mutations ---
-    def set_tile_type(self, col: int, row: int, tile_type: str) -> bool:
-        tile = self.get_tile(col, row)
-        if not tile:
-            return False
-        tile["type"] = tile_type
-        tile["walkable"] = tile_type != "water"
-        if tile["structure"]:
-            tile["walkable"] = False
-        self._invalidate(col, row)
-        self._pending_changes.append({"col": col, "row": row, "tile": dict(tile)})
-        return True
-
-    def add_structure(self, col: int, row: int, width: int, height: int,
-                      structure_type: str, label: str, owner: str = "") -> str | None:
-        """Place a building. Returns building_id or None if can't place."""
-        # Check all tiles are available
-        for dc in range(width):
-            for dr in range(height):
-                t = self.get_tile(col + dc, row + dr)
-                if not t or t.get("structure") or t["type"] == "water":
-                    return None
-
-        bid = f"{structure_type}_{self._next_building_id}"
-        self._next_building_id += 1
-
-        # Create BuildingDef
-        bdef = BuildingDef(
-            id=bid, label=label, col=col, row=row, width=width, height=height,
-            owner=owner, building_type=structure_type,
-        )
-        self.buildings.append(bdef)
-        self.building_map[bid] = bdef
-
-        # Update tiles
-        for dc in range(width):
-            for dr in range(height):
-                t = self.tiles[row + dr][col + dc]
-                t["structure"] = {"building_id": bid, "type": structure_type, "label": label, "owner": owner}
-                t["walkable"] = False
-                self._pending_changes.append({"col": col + dc, "row": row + dr, "tile": dict(t)})
-
-        self._path_cache.clear()
-        logger.info(f"Built {structure_type} '{label}' at ({col},{row}) id={bid}")
-        return bid
-
-    def remove_structure(self, building_id: str) -> bool:
-        """Remove a building, revert tiles to grass."""
-        bdef = self.building_map.get(building_id)
-        if not bdef:
-            return False
-
-        for dc in range(bdef.width):
-            for dr in range(bdef.height):
-                t = self.tiles[bdef.row + dr][bdef.col + dc]
-                t["structure"] = None
-                t["type"] = "grass"
-                t["walkable"] = True
-                self._pending_changes.append({"col": bdef.col + dc, "row": bdef.row + dr, "tile": dict(t)})
-
-        self.buildings.remove(bdef)
-        del self.building_map[building_id]
-        self._path_cache.clear()
-        logger.info(f"Removed building {building_id}")
-        return True
-
-    def set_decoration(self, col: int, row: int, decoration: str | None) -> bool:
-        tile = self.get_tile(col, row)
-        if not tile or tile.get("structure"):
-            return False
-        tile["decoration"] = decoration
-        if decoration == "tree":
-            tile["walkable"] = False
-        elif decoration is None:
-            tile["walkable"] = True
-        self._invalidate(col, row)
-        self._pending_changes.append({"col": col, "row": row, "tile": dict(tile)})
-        return True
-
-    def flush_changes(self) -> list[dict]:
-        """Get and clear pending tile changes for broadcast."""
-        changes = self._pending_changes[:]
-        self._pending_changes.clear()
-        return changes
-
-    def _invalidate(self, col: int, row: int):
-        self._path_cache.clear()
-
-    # --- Pathfinding ---
-    def get_building_entry(self, building_id: str) -> tuple[int, int]:
-        b = self.building_map.get(building_id)
-        if not b:
-            return (20, 20)
-        return (b.entry_col, b.entry_row)
-
     def find_path(self, start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
         if start == end:
             return [start]
-        cache_key = (start, end)
-        if cache_key in self._path_cache:
-            return self._path_cache[cache_key]
+        key = (start, end)
+        if key in self._path_cache:
+            return self._path_cache[key]
         path = self._a_star(start, end)
-        self._path_cache[cache_key] = path
+        self._path_cache[key] = path
         return path
 
-    def _a_star(self, start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
-        def heuristic(a, b):
-            return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
+    def _a_star(self, start, end):
         open_set = [(0, start)]
         came_from = {}
         g_score = {start: 0}
-        neighbors = [(0,1),(0,-1),(1,0),(-1,0)]
-
+        neighbors = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         while open_set:
             _, current = heapq.heappop(open_set)
             if current == end:
@@ -312,89 +604,179 @@ class World:
                     path.append(current)
                 path.reverse()
                 return path
-
             for dc, dr in neighbors:
-                neighbor = (current[0] + dc, current[1] + dr)
-                if not self.is_walkable(neighbor[0], neighbor[1]):
-                    if neighbor != end:
-                        continue
-                tentative_g = g_score[current] + 1
-                if tentative_g < g_score.get(neighbor, float("inf")):
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g
-                    heapq.heappush(open_set, (tentative_g + heuristic(neighbor, end), neighbor))
+                nb = (current[0] + dc, current[1] + dr)
+                if not self.is_walkable(nb[0], nb[1]) and nb != end:
+                    continue
+                tg = g_score[current] + 1
+                if tg < g_score.get(nb, float("inf")):
+                    came_from[nb] = current
+                    g_score[nb] = tg
+                    h = abs(nb[0] - end[0]) + abs(nb[1] - end[1])
+                    heapq.heappush(open_set, (tg + h, nb))
+        return [start]
 
-        return [start, end]
+    def get_distance(self, loc_a: str, loc_b: str) -> float:
+        ea = self.get_location_entry(loc_a)
+        eb = self.get_location_entry(loc_b)
+        return abs(ea[0] - eb[0]) + abs(ea[1] - eb[1])
 
-    # --- Serialization ---
-    def get_tile_grid(self) -> list[list[dict]]:
-        """Full grid for frontend sync."""
+    def get_tile_grid(self):
         return self.tiles
 
+    def build_structure(self, col: int, row: int, width: int, height: int, label: str, builder: str = "", purpose: str = "") -> str | None:
+        for dc in range(width):
+            for dr in range(height):
+                if not (0 <= col + dc < self.width and 0 <= row + dr < self.height):
+                    return None
+                tile = self.tiles[row + dr][col + dc]
+                if tile.get("structure") or tile["type"] == "water" or tile.get("decoration") == "tree":
+                    return None
+
+        bid = f"building_{self._next_building_id}"
+        self._next_building_id += 1
+        self.locations[bid] = {
+            "type": "built_structure",
+            "label": label,
+            "description": f"{label}, built by {builder or 'the settlers'}",
+            "col": col,
+            "row": row,
+            "width": width,
+            "height": height,
+            "capacity": width * height * 2,
+            "resources": [],
+            "claimed_by": builder or None,
+            "designated_purpose": purpose,
+        }
+        self.created_objects.append({
+            "id": bid,
+            "label": label,
+            "builder": builder,
+            "purpose": purpose,
+            "tick_hint": len(self.created_objects) + 1,
+        })
+        self._apply_structures_to_tiles()
+        self._sync_tile_resource_visuals()
+        self._path_cache.clear()
+        logger.info("Built '%s' at (%s,%s) by %s, id=%s", label, col, row, builder, bid)
+        return bid
+
+    def find_empty_space(self, width: int, height: int) -> tuple[int, int] | None:
+        center_col, center_row = 20, 20
+        for radius in range(2, 18):
+            row_start = max(2, center_row - radius)
+            row_end = min(self.height - height - 2, center_row + radius)
+            col_start = max(2, center_col - radius)
+            col_end = min(self.width - width - 2, center_col + radius)
+            for row in range(row_start, row_end + 1):
+                for col in range(col_start, col_end + 1):
+                    can_build = True
+                    for dc in range(width):
+                        for dr in range(height):
+                            tile = self.tiles[row + dr][col + dc]
+                            if tile.get("structure") or tile["type"] in ("water",) or tile.get("decoration") == "tree":
+                                can_build = False
+                                break
+                        if not can_build:
+                            break
+                    if can_build:
+                        return (col, row)
+        return None
+
     def get_buildings_list(self) -> list[dict]:
-        """Serialized buildings for frontend."""
-        return [
-            {
-                "id": b.id, "label": b.label, "type": b.building_type,
-                "col": b.col, "row": b.row, "width": b.width, "height": b.height,
-                "owner": b.owner,
-            }
-            for b in self.buildings
-        ]
+        buildings = []
+        for loc_id, loc in self.locations.items():
+            if loc.get("type") != "built_structure":
+                continue
+            buildings.append({
+                "id": loc_id,
+                "label": loc.get("label", loc_id.replace("_", " ").title()),
+                "type": loc["type"],
+                "col": loc["col"],
+                "row": loc["row"],
+                "width": loc["width"],
+                "height": loc["height"],
+                "owner": loc.get("claimed_by", ""),
+                "purpose": loc.get("designated_purpose", ""),
+            })
+        for project in self.projects:
+            if project.get("status") != "completed":
+                continue
+            if not project.get("render_as_structure"):
+                continue
+            buildings.append({
+                "id": project["id"],
+                "label": project.get("name", project["id"]),
+                "type": "project",
+                "col": project.get("col", 0),
+                "row": project.get("row", 0),
+                "width": project.get("width", 2),
+                "height": project.get("height", 2),
+                "owner": project.get("sponsor", ""),
+                "purpose": project.get("kind", ""),
+            })
+        return buildings
+
+    def get_world_summary(self) -> str:
+        built = sum(1 for loc in self.locations.values() if loc.get("type") == "built_structure")
+        claimed = sum(1 for loc in self.locations.values() if loc.get("claimed_by"))
+        return (
+            f"Untouched wilderness around a central clearing. {built} structures built so far, "
+            f"{claimed} claimed spaces. {len(self.active_proposals)} active proposals, "
+            f"{len(self.projects)} projects, {len(self.trades)} trades. Constitution: {self.constitution.summary()}"
+        )
 
     def to_save_dict(self) -> dict:
-        """Serialize for database persistence."""
         return {
-            "tiles": [[t for t in row] for row in self.tiles],
-            "buildings": [
-                {"id": b.id, "label": b.label, "col": b.col, "row": b.row,
-                 "width": b.width, "height": b.height, "entry_col": b.entry_col,
-                 "entry_row": b.entry_row, "owner": b.owner, "building_type": b.building_type}
-                for b in self.buildings
-            ],
+            "version": 2,
+            "locations": self.locations,
+            "resources": self.resources,
+            "constitution": self.constitution.to_dict(),
+            "created_objects": self.created_objects[-50:],
+            "trades": self.trades[-50:],
+            "active_proposals": self.active_proposals[-50:],
+            "meetings": self.meetings[-50:],
+            "coalitions": self.coalitions[-50:],
+            "norm_violations": self.norm_violations[-80:],
+            "projects": self.projects[-50:],
             "next_building_id": self._next_building_id,
+            "tile_resource_state": self.tile_resource_state,
         }
 
     def load_from_save(self, data: dict):
-        """Restore from saved state."""
-        if data.get("tiles"):
-            self.tiles = data["tiles"]
-        if data.get("buildings"):
-            self.buildings = []
-            self.building_map = {}
-            for bd in data["buildings"]:
-                bdef = BuildingDef(**bd)
-                self.buildings.append(bdef)
-                self.building_map[bdef.id] = bdef
-        if data.get("next_building_id"):
-            self._next_building_id = data["next_building_id"]
+        if data.get("locations"):
+            self.locations = data["locations"]
+        if data.get("resources"):
+            self.resources = data["resources"]
+        if data.get("constitution"):
+            self.constitution.load_from_dict(data["constitution"])
+        if data.get("created_objects"):
+            self.created_objects = data["created_objects"]
+        if data.get("trades"):
+            self.trades = data["trades"]
+        if data.get("active_proposals"):
+            self.active_proposals = data["active_proposals"]
+        if data.get("meetings"):
+            self.meetings = data["meetings"]
+        if data.get("coalitions"):
+            self.coalitions = data["coalitions"]
+        if data.get("norm_violations"):
+            self.norm_violations = data["norm_violations"]
+        if data.get("projects"):
+            self.projects = data["projects"]
+        self._next_building_id = data.get("next_building_id", self._next_building_id)
+        self._generate_world()
+        if data.get("tile_resource_state"):
+            self.tile_resource_state = data["tile_resource_state"]
+            for key, state in self.tile_resource_state.items():
+                col, row = map(int, key.split(","))
+                tile = self.tiles[row][col]
+                if state.get("wood", 0) > 0:
+                    tile["decoration"] = "tree"
+                    tile["walkable"] = False
+                elif tile.get("structure") is None and tile.get("decoration") == "tree":
+                    tile["decoration"] = None
+                    tile["walkable"] = True
+        self._sync_tile_resource_visuals()
+        self._apply_structures_to_tiles()
         self._path_cache.clear()
-        logger.info(f"Loaded world: {len(self.buildings)} buildings")
-
-    def find_empty_space(self, width: int, height: int) -> tuple[int, int] | None:
-        """Find an empty area near existing paths for building."""
-        for row in range(5, MAP_SIZE - height - 5):
-            for col in range(5, MAP_SIZE - width - 5):
-                can_build = True
-                for dc in range(width):
-                    for dr in range(height):
-                        t = self.get_tile(col + dc, row + dr)
-                        if not t or t.get("structure") or t.get("decoration") == "tree" or t["type"] in ("water", "path"):
-                            can_build = False
-                            break
-                    if not can_build:
-                        break
-                if can_build:
-                    # Check proximity to a path
-                    near_path = False
-                    for dc in range(-2, width + 2):
-                        for dr in range(-2, height + 2):
-                            t = self.get_tile(col + dc, row + dr)
-                            if t and t["type"] == "path":
-                                near_path = True
-                                break
-                        if near_path:
-                            break
-                    if near_path:
-                        return (col, row)
-        return None

@@ -7,7 +7,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from simulation.engine_v2 import SimulationEngineV2 as SimulationEngine
+from simulation.engine import SimulationEngine
 
 logger = logging.getLogger("agentica")
 logging.basicConfig(level=logging.INFO)

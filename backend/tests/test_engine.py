@@ -19,12 +19,12 @@ fake_aiosqlite = types.ModuleType("aiosqlite")
 fake_aiosqlite.connect = None
 sys.modules.setdefault("aiosqlite", fake_aiosqlite)
 
-from simulation.engine_v2 import SimulationEngineV2
+from simulation.engine import SimulationEngine
 
 
-class EngineV2PlanningTests(unittest.TestCase):
+class EnginePlanningTests(unittest.TestCase):
     def setUp(self):
-        self.engine = SimulationEngineV2()
+        self.engine = SimulationEngine()
         self.agent = next(iter(self.engine.agents.values()))
 
     def test_schedule_drives_action_when_needs_are_not_urgent(self):
