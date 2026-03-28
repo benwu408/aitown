@@ -335,13 +335,22 @@ class SimulationEngineV2:
                 fragments.append(f"I still feel tension with {agent.active_conflicts[0]['with']}.")
             if agent.current_institution_roles:
                 role = agent.current_institution_roles[0]
-                fragments.append(f"I'm part of {role.get('institution_name')} as {role.get('role')}.")
+                role_name = role.get('role', 'member')
+                fragments.append(f"I serve as {role_name} in a local group.")
             if agent.project_roles:
-                fragments.append(f"I'm helping as {agent.project_roles[0].get('role')} on {agent.project_roles[0].get('project_id')}.")
+                proj_role = agent.project_roles[0].get('role', 'helper')
+                fragments.append(f"I'm helping out as {proj_role} on a project.")
             if agent.life_events:
-                fragments.append(agent.life_events[0].get("summary", ""))
+                event_text = agent.life_events[0].get("summary", "")
+                if len(event_text) > 80:
+                    event_text = event_text[:80].rsplit(' ', 1)[0] + '...'
+                if event_text:
+                    fragments.append(event_text)
             if agent.working_memory.background_worry:
-                fragments.append(f"What still nags at me: {agent.working_memory.background_worry}")
+                worry = agent.working_memory.background_worry
+                if len(worry) > 80:
+                    worry = worry[:80].rsplit(' ', 1)[0] + '...'
+                fragments.append(f"What still nags at me: {worry}")
             summary = " ".join(f for f in fragments[:4] if f).strip()
             if summary:
                 agent.identity.self_narrative = summary[:320]
@@ -478,9 +487,13 @@ class SimulationEngineV2:
                 agent = next((a for a in self.agents.values() if a.name == member_name), None)
                 if not agent:
                     continue
+                inst_name = inst.get("name", "a group")
+                # Truncate long institution names for readable display
+                if len(inst_name) > 40:
+                    inst_name = inst_name[:40].rsplit(' ', 1)[0] + '...'
                 agent.current_institution_roles.append({
                     "institution_id": inst.get("id"),
-                    "institution_name": inst.get("name"),
+                    "institution_name": inst_name,
                     "role": roles.get(member_name, "member"),
                     "location": location,
                 })
@@ -509,16 +522,19 @@ class SimulationEngineV2:
                     agent = next((a for a in self.agents.values() if a.name == member_name), None)
                     if not agent:
                         continue
+                    topic = meeting['topic']
+                    short_topic = topic[:50].rsplit(' ', 1)[0] + '...' if len(topic) > 50 else topic
+                    desc = f"Attend group meeting: {short_topic}"
                     duplicate = any(
                         c.get("kind") == "meeting"
-                        and c.get("description") == f"Attend {meeting['topic']}"
+                        and c.get("description") == desc
                         and c.get("scheduled_day") == meeting["scheduled_day"]
                         for c in agent.social_commitments
                     )
                     if not duplicate:
                         agent.social_commitments.append({
                             "kind": "meeting",
-                            "description": f"Attend {meeting['topic']}",
+                            "description": desc,
                             "participants": meeting["participants"],
                             "location": location,
                             "time_hint": "evening",
@@ -584,7 +600,10 @@ class SimulationEngineV2:
                     continue
                 commitment["status"] = "failed"
                 others = [name for name in commitment.get("participants", []) if name != agent.name]
-                description = f"{agent.name} failed to show for {commitment.get('description', 'an obligation')}."
+                raw_desc = commitment.get('description', 'an obligation')
+                # Truncate long proposal/task descriptions to keep conflict summaries readable
+                short_desc = raw_desc[:60].rsplit(' ', 1)[0] + '...' if len(raw_desc) > 60 else raw_desc
+                description = f"{agent.name} didn't show up for: {short_desc}"
                 self._record_social_breach(agent, others, description, kind="obligation", severity=0.55)
                 self.world.add_norm_violation({
                     "tick": self.tick,
@@ -666,7 +685,7 @@ class SimulationEngineV2:
                     if agent.name in meeting["participants"]:
                         agent.social_commitments.append({
                             "kind": "meeting",
-                            "description": f"Attend meeting about {proposal['description']}",
+                            "description": f"Attend meeting about a proposal" if len(proposal['description']) > 50 else f"Attend meeting about {proposal['description']}",
                             "participants": meeting["participants"],
                             "location": meeting["location"],
                             "time_hint": "soon",

@@ -314,8 +314,8 @@ class AgentV2:
         """Drive-based routine behavior — agents only go to places they know or can see."""
         import random as _rand
 
-        # Personal night window → head home and sleep
-        if self.prefers_sleeping_now(hour):
+        # Personal night window → head home and sleep (but not if just woken up with low tiredness)
+        if self.prefers_sleeping_now(hour) and self.drives.rest > 0.3:
             home = self._find_home()
             return {"action": "sleeping", "target": home or self.current_location, "thought": "Time to rest."}
 
