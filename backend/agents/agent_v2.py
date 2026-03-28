@@ -113,6 +113,16 @@ class AgentV2:
         self.working_memory.push("I need to find food, water, and shelter.")
         self.working_memory.set_worry("What if there isn't enough for everyone?")
 
+    def _inventory_value(self) -> float:
+        """Rough 'wealth' estimate based on effort values of held items."""
+        from systems.economy import EFFORT_VALUES
+        total = 0.0
+        for item in self.inventory:
+            name = item.get("name", "")
+            qty = int(item.get("quantity", 1))
+            total += EFFORT_VALUES.get(name, 1.0) * qty
+        return round(total, 1)
+
     def inventory_count(self, item_name: str) -> int:
         total = 0
         for item in self.inventory:
@@ -467,16 +477,17 @@ class AgentV2:
                 "energy": round(1.0 - self.drives.rest, 2),
                 "hunger": round(self.drives.hunger, 2),
                 "mood": round(max(0, min(1, (self.emotional_state.valence + 1) / 2)), 2),
-                "wealth": 0,
-                "debt": 0,
-                "dailyIncome": 0,
-                "dailyExpenses": 0,
+                "wealth": self._inventory_value(),
+                "debt": round(self.debt, 1),
+                "dailyIncome": round(self.daily_income, 1),
+                "dailyExpenses": round(self.daily_expenses, 1),
+                "tradeCount": len(self.transactions),
             },
             "emotions": self.emotional_state.to_dict(),
             "drives": self.drives.to_dict(),
             "workingMemory": self.working_memory.to_dict(),
-            "transactions": [],
-            "inventory": [{"name": i.get("name", str(i))} for i in self.inventory[:5]],
+            "transactions": self.transactions[-5:],
+            "inventory": [{"name": i.get("name", str(i)), "quantity": i.get("quantity", 1)} for i in self.inventory[:10]],
             "socialCommitments": self.social_commitments[:5],
             "longTermGoals": self.long_term_goals[:5],
             "activeIntentions": self.active_intentions[:5],

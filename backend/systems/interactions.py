@@ -157,6 +157,7 @@ INTERACTION_TYPES = {
     "info": {"turns": (3, 5), "llm": True},
     "request": {"turns": (2, 4), "llm": True},
     "negotiation": {"turns": (3, 8), "llm": True},
+    "trade": {"turns": (2, 5), "llm": True},
     "deep": {"turns": (5, 12), "llm": True},
     "argument": {"turns": (3, 8), "llm": True},
     "comforting": {"turns": (3, 8), "llm": True},
@@ -165,12 +166,37 @@ INTERACTION_TYPES = {
 }
 
 
+def _agents_have_complementary_inventory(agent, other) -> bool:
+    """Check if agents have items the other might want."""
+    from systems.economy import FOOD_ITEMS, BUILDING_ITEMS
+    agent_has_food = any(i.get("name") in FOOD_ITEMS for i in agent.inventory)
+    agent_has_building = any(i.get("name") in BUILDING_ITEMS for i in agent.inventory)
+    other_has_food = any(i.get("name") in FOOD_ITEMS for i in other.inventory)
+    other_has_building = any(i.get("name") in BUILDING_ITEMS for i in other.inventory)
+
+    # One has food surplus + needs building, the other has building surplus + needs food
+    if agent_has_food and other_has_building and agent.drives.shelter_need > 0.3:
+        return True
+    if agent_has_building and other_has_food and agent.drives.hunger > 0.3:
+        return True
+    # Both have different items
+    if agent_has_food != other_has_food or agent_has_building != other_has_building:
+        return True
+    return False
+
+
 def select_interaction_type(agent, other, reason: str, rel: dict) -> str:
     familiarity = rel.get("familiarity", 0.1)
     sentiment = rel.get("sentiment", 0.5)
 
     if reason == "they seem upset":
         return "comforting"
+
+    # Trade when one agent is in need and the other has what they want
+    if familiarity > 0.05 and _agents_have_complementary_inventory(agent, other):
+        # Higher chance of trade when driven by need
+        if agent.drives.hunger > 0.4 or agent.drives.shelter_need > 0.4:
+            return "trade"
 
     # New settlement — people need to figure things out together
     if reason == "haven't met yet":
@@ -289,6 +315,27 @@ class ConversationV2:
         type_info = INTERACTION_TYPES.get(interaction_type, {"turns": (2, 4)})
         self.max_turns = random.randint(*type_info["turns"])
 
+    def _inventory_summary(self, agent) -> str:
+        if not agent.inventory:
+            return "nothing"
+        counts: dict[str, int] = {}
+        for item in agent.inventory:
+            name = item.get("name", "unknown")
+            counts[name] = counts.get(name, 0) + int(item.get("quantity", 1))
+        return ", ".join(f"{qty} {name.replace('_', ' ')}" for name, qty in counts.items())
+
+    def _trade_context(self, speaker, listener) -> str:
+        if self.interaction_type != "trade":
+            return ""
+        return f"""
+TRADE CONTEXT:
+Your inventory: {self._inventory_summary(speaker)}
+{listener.name}'s visible inventory: {self._inventory_summary(listener)}
+Your needs: hunger={speaker.drives.hunger:.1f}, shelter_need={speaker.drives.shelter_need:.1f}
+
+You can propose a concrete exchange using the barter_offer actionable kind. Specify exact items and quantities.
+Be practical — offer what you have surplus of for what you actually need."""
+
     async def generate_turn(self, speaker, listener, previous_speech: str = "") -> dict:
         from llm.client import llm_client
 
@@ -297,6 +344,7 @@ class ConversationV2:
 
         if not previous_speech:
             # Opening line
+            trade_ctx = self._trade_context(speaker, listener)
             prompt = f"""You are {speaker.name}. You've decided to talk to {listener.name}.
 Why: {self.reason}. Type: {self.interaction_type}.
 
@@ -305,7 +353,7 @@ Your drives: {speaker.drives.get_prompt_description()}
 Your relationship with {listener.name}: sentiment={rel.get('sentiment',0.5):.1f}, trust={rel.get('trust',0.5):.1f}
 {mental_model}
 What's on your mind: {speaker.working_memory.get_prompt_context()}
-
+{trade_ctx}
 Context: {self.location}. You're all new settlers who just arrived at this place.
 
 Start with something SPECIFIC: what you've noticed about this place, what you need help with, what you're curious about, something you discovered, or ask them about themselves. Don't just say "hello" or "how are you" — say something with substance. 1-2 sentences.
@@ -313,6 +361,7 @@ Start with something SPECIFIC: what you've noticed about this place, what you ne
 Return JSON:
 {{"speech": "what you say", "inner_thought": "what you're thinking", "tone": "warm/casual/tense/hesitant", "emotion_shift": "how this makes you feel or null", "actionable": {{"kind": "decision_to_meet/decision_to_gather/decision_to_build/decision_to_visit/proposal/request/offer/promise/agreement/meeting_invitation/barter_offer/support_signal/opposition_signal/alliance_signal/request_help or null", "description": "clear actionable statement or null", "location": "location id or null", "time_hint": "morning/noon/evening/tomorrow/number or null", "participants": ["names involved"], "required_resources": ["wood"], "recurring": false}}}}"""
         else:
+            trade_ctx = self._trade_context(speaker, listener)
             prompt = f"""You are {speaker.name} in conversation with {listener.name}.
 
 They said: "{previous_speech}"
@@ -320,7 +369,7 @@ They said: "{previous_speech}"
 Your emotional state: {speaker.emotional_state.get_prompt_description()}
 Your relationship: sentiment={rel.get('sentiment',0.5):.1f}, trust={rel.get('trust',0.5):.1f}
 {mental_model}
-
+{trade_ctx}
 RULES:
 - Do NOT repeat or rephrase what they just said
 - Do NOT echo their words back. Add something NEW.
@@ -505,13 +554,18 @@ def process_conversation_consequences(agent, other_name: str, conversation: Conv
         description = commitment.get("description", "")
         if kind in {"barter_offer", "offer"}:
             agent.active_intentions.insert(0, {
-                "goal": f"Work out a trade with {other_name}",
+                "goal": f"Complete trade with {other_name}",
                 "why": f"{other_name} floated a concrete exchange: {description}",
-                "urgency": 0.58,
+                "urgency": 0.68,
                 "source": "trade",
                 "target_location": commitment.get("location") or conversation.location,
                 "next_step": description,
                 "status": "active",
+                "trade_details": {
+                    "partner": other_name,
+                    "description": description,
+                    "required_resources": commitment.get("required_resources", []),
+                },
             })
             agent.note_reciprocity(other_name)
             agent.mental_models.update_from_interaction(
