@@ -75,7 +75,7 @@ class SocialSystem:
 
                 # Chance to learn gossip based on extroversion
                 extroversion = agent.profile.personality.get("extraversion", 0.5)
-                if random.random() < extroversion * 0.05:
+                if random.random() < extroversion * 0.15:
                     # Agent learns the gossip
                     from agents.memory import MemoryEntry
                     agent.memory.add(MemoryEntry(
@@ -110,3 +110,33 @@ class SocialSystem:
 
 
 social_system = SocialSystem()
+
+
+class BulletinBoard:
+    """Town bulletin board — agents post thoughts, news, announcements."""
+
+    def __init__(self):
+        self.posts: list[dict] = []
+        # Each: {"author_id": str, "author_name": str, "content": str, "tick": int, "day": int}
+
+    def add_post(self, author_id: str, author_name: str, content: str, tick: int, day: int):
+        self.posts.append({
+            "author_id": author_id,
+            "author_name": author_name,
+            "content": content,
+            "tick": tick,
+            "day": day,
+        })
+        # Keep last 50 posts
+        if len(self.posts) > 50:
+            self.posts = self.posts[-50:]
+        logger.info(f"Bulletin post by {author_name}: {content[:50]}")
+
+    def get_recent(self, n: int = 20) -> list[dict]:
+        return self.posts[-n:]
+
+    def get_unread_since(self, tick: int) -> list[dict]:
+        return [p for p in self.posts if p["tick"] > tick]
+
+
+bulletin_board = BulletinBoard()

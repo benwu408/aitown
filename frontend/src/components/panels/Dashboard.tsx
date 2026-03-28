@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSimulationStore } from "../../stores/simulationStore";
 import { AGENT_COLORS } from "../../utils/formatting";
 
-const TABS = ["overview", "agents", "economy", "timeline", "social"] as const;
+const TABS = ["overview", "agents", "timeline", "social", "constitution", "resources", "bulletin"] as const;
 type Tab = (typeof TABS)[number];
 
 const FEED_FILTERS = ["All", "Conversations", "Thoughts", "Transactions", "Events", "Gossip"] as const;
@@ -71,7 +71,7 @@ export default function Dashboard({ onSend, onClose }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
         <div className="flex items-center gap-4">
-          <h1 className="text-lg font-bold text-amber-400">Town Dashboard</h1>
+          <h1 className="text-lg font-bold text-amber-400">Polis Dashboard</h1>
           {time && (
             <span className="text-sm text-gray-400">
               Day {time.day} | {time.time_string} | {time.weather} | {time.season}
@@ -107,24 +107,34 @@ export default function Dashboard({ onSend, onClose }: Props) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-6">
-        {tab === "overview" && <OverviewTab stats={townStats} economy={economy} activeEvents={activeEvents} eventLog={eventLog} time={time} />}
+        {tab === "overview" && <OverviewTab stats={townStats} economy={economy} activeEvents={activeEvents} eventLog={eventLog} time={time} worldSummary={dashboardData?.worldSummary || ""} />}
         {tab === "agents" && (
           <AgentsTab agents={agentDetails.length > 0 ? agentDetails : Object.values(agents)} expanded={expandedAgent} onToggle={(id) => setExpandedAgent(expandedAgent === id ? null : id)} sort={agentSort} onSort={setAgentSort} />
         )}
         {tab === "economy" && <EconomyTab economy={economy} agents={agentDetails.length > 0 ? agentDetails : Object.values(agents)} />}
         {tab === "timeline" && (
-          <TimelineTab feed={filteredFeed} filter={feedFilter} search={search} agentFilter={agentFilter} agents={Object.values(agents)} feedCounts={feedCounts} onFilter={setFeedFilter} onSearch={setSearch} onAgentFilter={setAgentFilter} />
+          <TimelineTab feed={filteredFeed} filter={feedFilter} search={search} agentFilter={agentFilter} agents={Object.values(agents)} feedCounts={feedCounts} onFilter={setFeedFilter} onSearch={setSearch} onAgentFilter={setAgentFilter} dayRecaps={dashboardData?.dayRecaps || []} />
         )}
         {tab === "social" && <SocialTab agents={agentDetails.length > 0 ? agentDetails : []} />}
+        {tab === "constitution" && <ConstitutionTab constitution={dashboardData?.constitution || {}} />}
+        {tab === "resources" && <ResourcesTab resources={dashboardData?.resources || {}} />}
+        {tab === "bulletin" && <BulletinTab posts={dashboardData?.bulletinBoard || []} />}
       </div>
     </div>
   );
 }
 
 /* ==================== OVERVIEW TAB ==================== */
-function OverviewTab({ stats, economy, activeEvents, eventLog, time }: any) {
+function OverviewTab({ stats, economy, activeEvents, eventLog, time, worldSummary }: any) {
   return (
     <div className="space-y-6">
+      {/* World Summary */}
+      {worldSummary && (
+        <div className="p-3 bg-gray-900 rounded-lg border border-gray-800 text-sm text-gray-300">
+          {worldSummary}
+        </div>
+      )}
+
       {/* Stat cards */}
       <div className="grid grid-cols-4 gap-3">
         <StatCard label="Population" value={stats.population || 15} />
@@ -132,13 +142,11 @@ function OverviewTab({ stats, economy, activeEvents, eventLog, time }: any) {
         <StatCard label="Season" value={time?.season || "spring"} text />
         <StatCard label="Weather" value={time?.weather || "clear"} text />
         <StatCard label="Avg Mood" value={`${Math.round((stats.avgMood || 0) * 100)}%`} color={stats.avgMood > 0.6 ? "text-green-400" : stats.avgMood > 0.3 ? "text-yellow-400" : "text-red-400"} />
-        <StatCard label="Avg Wealth" value={`${Math.round(stats.avgWealth || 0)}c`} color="text-amber-400" />
-        <StatCard label="Total Wealth" value={`${stats.totalWealth || 0}c`} color="text-amber-400" />
-        <StatCard label="Treasury" value={`${Math.round(economy.treasury || 0)}c`} color="text-blue-400" />
-        <StatCard label="Conversations" value={stats.totalConversations || 0} />
-        <StatCard label="Reflections" value={stats.totalReflections || 0} />
-        <StatCard label="Transactions" value={stats.totalTransactions || 0} />
+        <StatCard label="Claimed Buildings" value={stats.claimedBuildings || 0} />
+        <StatCard label="Unclaimed" value={stats.unclaimedBuildings || 0} />
         <StatCard label="Total Memories" value={stats.totalMemories || 0} />
+        <StatCard label="Skills Found" value={stats.totalSkillsDiscovered || 0} />
+        <StatCard label="Places Found" value={stats.totalLocationsDiscovered || 0} />
       </div>
 
       {/* Notable agents */}
@@ -347,6 +355,21 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
                     </div>
                   )}
 
+                  {/* Social Commitments */}
+                  {a.socialCommitments && a.socialCommitments.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase mb-1">Plans ({a.socialCommitments.length})</div>
+                      <div className="space-y-0.5">
+                        {a.socialCommitments.map((c: any, i: number) => (
+                          <div key={i} className="text-[10px] text-cyan-400">
+                            {c.what} — {c.where?.replace(/_/g, " ")}{c.with?.length > 0 ? ` with ${c.with.join(", ")}` : ""}
+                            {c.recurring && <span className="text-amber-500 ml-1">(recurring)</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Transactions */}
                   {txnCount > 0 && (
                     <div>
@@ -498,7 +521,7 @@ function MiniSparkline({ values }: { values: number[] }) {
 }
 
 /* ==================== TIMELINE TAB ==================== */
-function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, onFilter, onSearch, onAgentFilter }: any) {
+function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, onFilter, onSearch, onAgentFilter, dayRecaps = [] }: any) {
   const TYPE_COLORS: Record<string, string> = {
     agent_speak: "text-blue-400", agent_thought: "text-purple-400", transaction: "text-amber-400",
     system_event: "text-red-400", gossip: "text-pink-400", agent_move: "text-gray-500", agent_action: "text-gray-400",
@@ -506,6 +529,19 @@ function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, on
 
   return (
     <div className="space-y-3">
+      {/* Day Recaps */}
+      {dayRecaps.length > 0 && (
+        <div className="space-y-1 mb-3">
+          <div className="text-[10px] text-gray-500 uppercase">Daily Recaps</div>
+          {[...dayRecaps].reverse().slice(0, 5).map((r: any, i: number) => (
+            <div key={i} className="p-2 bg-amber-950/20 border border-amber-900/30 rounded text-xs text-gray-300">
+              <span className="text-amber-400 font-medium mr-1">Day {r.day}:</span>
+              {r.summary}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 flex-wrap">
         {FEED_FILTERS.map((f) => (
           <button key={f} onClick={() => onFilter(f)} className={`px-2 py-1 text-xs rounded ${filter === f ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-400 hover:bg-gray-700"}`}>
@@ -625,6 +661,166 @@ function SocialTab({ agents }: { agents: any[] }) {
             })}
           </tbody>
         </table>
+      )}
+    </div>
+  );
+}
+
+/* ==================== CONSTITUTION TAB ==================== */
+function ConstitutionTab({ constitution }: { constitution: any }) {
+  const economic = constitution.economic || {};
+  const governance = constitution.governance || {};
+  const norms = constitution.norms || [];
+  const institutions = constitution.institutions || [];
+  const history = constitution.history || [];
+
+  return (
+    <div className="space-y-6 max-w-3xl">
+      {/* Status summary */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <h3 className="text-xs text-gray-500 uppercase mb-2">Governance</h3>
+          <div className="text-sm text-gray-300">
+            {governance.system || "No system established"}
+          </div>
+          {governance.informal_leader && (
+            <div className="text-xs text-amber-400 mt-1">Informal leader: {governance.informal_leader}</div>
+          )}
+          {governance.leaders?.length > 0 && (
+            <div className="text-xs text-gray-400 mt-1">Leaders: {governance.leaders.join(", ")}</div>
+          )}
+          {governance.laws?.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] text-gray-600 uppercase">Laws</div>
+              {governance.laws.map((l: string, i: number) => (
+                <div key={i} className="text-xs text-gray-400">- {l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <h3 className="text-xs text-gray-500 uppercase mb-2">Economy</h3>
+          <div className="text-sm text-gray-300">
+            Currency: {economic.currency || "None (barter only)"}
+          </div>
+          {economic.trade_rules?.length > 0 && (
+            <div className="mt-1 text-xs text-gray-400">
+              Trade rules: {economic.trade_rules.join("; ")}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Social Norms */}
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <h3 className="text-xs text-gray-500 uppercase mb-2">Social Norms ({norms.length})</h3>
+        {norms.length === 0 ? (
+          <p className="text-xs text-gray-600 italic">No norms have emerged yet</p>
+        ) : (
+          <div className="space-y-1">
+            {norms.map((n: string, i: number) => (
+              <div key={i} className="text-xs text-gray-300">- {n}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Institutions */}
+      {institutions.length > 0 && (
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <h3 className="text-xs text-gray-500 uppercase mb-2">Institutions ({institutions.length})</h3>
+          {institutions.map((inst: any, i: number) => (
+            <div key={i} className="text-xs text-gray-300 mb-1">
+              <span className="text-amber-400">{inst.name}</span>: {inst.purpose || "no stated purpose"}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Change History */}
+      {history.length > 0 && (
+        <div>
+          <h3 className="text-xs text-gray-500 uppercase mb-2">Change History ({history.length})</h3>
+          <div className="space-y-1">
+            {[...history].reverse().slice(0, 15).map((h: any, i: number) => (
+              <div key={i} className="text-[10px] text-gray-500">
+                <span className="text-gray-600">[Tick {h.tick}]</span> {h.type}: {h.description}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==================== RESOURCES TAB ==================== */
+function ResourcesTab({ resources }: { resources: any }) {
+  const entries = Object.entries(resources || {});
+
+  return (
+    <div className="space-y-4 max-w-2xl">
+      <div className="text-xs text-gray-500">{entries.length} resource types in the world</div>
+
+      {entries.length === 0 ? (
+        <p className="text-gray-600 italic text-sm">No resource data available</p>
+      ) : (
+        <div className="space-y-2">
+          {entries.map(([name, data]: [string, any]) => {
+            const qty = data.quantity || 0;
+            const renewable = data.renewable;
+            const regen = data.regen_rate || 0;
+            const locations = Array.isArray(data.locations) ? data.locations : [data.locations];
+            const maxQty = 500;
+            const pct = Math.min(100, (qty / maxQty) * 100);
+            const color = qty > 100 ? "bg-green-500" : qty > 30 ? "bg-yellow-500" : "bg-red-500";
+
+            return (
+              <div key={name} className="bg-gray-900 rounded-lg border border-gray-800 p-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-gray-200 capitalize">{name.replace(/_/g, " ")}</span>
+                  <span className="text-xs text-gray-400">
+                    {qty} {renewable ? `(+${regen}/cycle)` : "(finite)"}
+                  </span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-2 mb-1">
+                  <div className={`${color} h-2 rounded-full`} style={{ width: `${pct}%` }} />
+                </div>
+                <div className="text-[10px] text-gray-600">
+                  Found at: {locations.join(", ")}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==================== BULLETIN TAB ==================== */
+function BulletinTab({ posts }: { posts: any[] }) {
+  return (
+    <div className="space-y-3 max-w-2xl">
+      <div className="text-xs text-gray-500">{posts.length} posts on the bulletin board</div>
+
+      {posts.length === 0 ? (
+        <div className="text-center py-12">
+          <p className="text-gray-500 text-sm">No posts yet. Agents will start posting thoughts, news, and announcements here.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {[...posts].reverse().map((p: any, i: number) => (
+            <div key={i} className="bg-gray-900 rounded-lg border border-gray-800 p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-xs font-medium text-amber-400">{p.author_name}</span>
+                <span className="text-[9px] text-gray-600">Day {p.day}</span>
+              </div>
+              <p className="text-sm text-gray-300 leading-relaxed">{p.content}</p>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

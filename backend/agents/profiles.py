@@ -27,6 +27,36 @@ class AgentProfile:
     schedule: list[ScheduleEntry]
     relationships: dict[str, dict] = field(default_factory=dict)
     color_index: int = 0
+    secrets: list[dict] = field(default_factory=list)
+
+
+# Town topics for opinion system
+TOWN_TOPICS = ["taxes", "clinic_funding", "modernization", "outsiders", "school_budget", "tradition"]
+
+
+def seed_opinions(personality: dict[str, float], values: list[str]) -> dict[str, dict]:
+    """Generate initial opinions based on personality traits and values."""
+    o = personality.get("openness", 0.5)
+    c = personality.get("conscientiousness", 0.5)
+    a = personality.get("agreeableness", 0.5)
+    opinions = {}
+    opinions["taxes"] = {"stance": round((c - 0.5) * 0.6, 2), "confidence": 0.3, "last_updated": 0}
+    opinions["clinic_funding"] = {"stance": round((a - 0.3) * 0.8, 2), "confidence": 0.3, "last_updated": 0}
+    opinions["modernization"] = {"stance": round((o - 0.5) * 1.0, 2), "confidence": 0.3, "last_updated": 0}
+    opinions["outsiders"] = {"stance": round((o + a - 1.0) * 0.5, 2), "confidence": 0.2, "last_updated": 0}
+    opinions["school_budget"] = {"stance": round((o - 0.3) * 0.6, 2), "confidence": 0.2, "last_updated": 0}
+    opinions["tradition"] = {"stance": round((c - o) * 0.8, 2), "confidence": 0.3, "last_updated": 0}
+    # Boost confidence for values-aligned topics
+    if "tradition" in values:
+        opinions["tradition"]["stance"] = max(opinions["tradition"]["stance"], 0.3)
+        opinions["tradition"]["confidence"] = 0.6
+    if "progress" in values or "education" in values:
+        opinions["modernization"]["stance"] = max(opinions["modernization"]["stance"], 0.3)
+        opinions["modernization"]["confidence"] = 0.5
+    if "healing" in values or "service" in values:
+        opinions["clinic_funding"]["stance"] = max(opinions["clinic_funding"]["stance"], 0.4)
+        opinions["clinic_funding"]["confidence"] = 0.6
+    return opinions
 
 
 AGENT_PROFILES: list[AgentProfile] = [
@@ -44,6 +74,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Eleanor has been mayor for 12 years. She took the job after her husband passed and threw herself into public service.",
         wealth=800,
         color_index=0,
+        secrets=[{"content": "I have been diverting small amounts from the town treasury for personal use", "known_by": [], "importance": 9.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(6.0, "house_1", "sleeping"),
             ScheduleEntry(7.0, "house_1", "eating"),
@@ -70,6 +101,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="John is a widower who inherited the farm from his father. He's practical and slightly grumpy but deeply reliable.",
         wealth=400,
         color_index=1,
+        secrets=[{"content": "My farm is mortgaged and I am close to losing it entirely", "known_by": [], "importance": 9.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(5.0, "farm", "working"),
             ScheduleEntry(12.0, "house_2", "eating"),
@@ -94,6 +126,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Mei is friendly and entrepreneurial. She runs the general store and knows everyone's business — the town's unofficial information hub.",
         wealth=600,
         color_index=2,
+        secrets=[{"content": "I am in significant debt to a supplier in another town and cannot pay them back", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "general_store", "working"),
             ScheduleEntry(12.0, "bakery", "eating"),
@@ -117,6 +150,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Oleg immigrated from another town years ago. He's quiet and philosophical, finding meaning through his work at the forge.",
         wealth=500,
         color_index=3,
+        secrets=[{"content": "I fled my previous town after being accused of a crime I did not commit", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(6.0, "workshop", "working"),
             ScheduleEntry(12.0, "house_5", "eating"),
@@ -140,6 +174,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Sarah is idealistic and passionate about education. She thinks the town needs to modernize and has been vocal about wanting change.",
         wealth=350,
         color_index=4,
+        secrets=[{"content": "I have been secretly meeting with outside political organizers to plan a campaign against Eleanor", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "school", "working"),
             ScheduleEntry(12.0, "bakery", "eating"),
@@ -164,6 +199,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Ricky is charismatic and funny, the social hub of town. He hears everyone's problems. Secretly lonely — the bartender nobody checks on.",
         wealth=450,
         color_index=5,
+        secrets=[{"content": "I am an alcoholic and I drink alone every night after closing the tavern", "known_by": [], "importance": 7.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(8.0, "tavern", "idle"),
             ScheduleEntry(10.0, "general_store", "buying"),
@@ -187,6 +223,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Amara is calm, wise, and universally respected. She makes house calls since there's no clinic — her biggest frustration.",
         wealth=500,
         color_index=6,
+        secrets=[{"content": "I lost a patient in my previous town due to a mistake I made, and I blame myself every day", "known_by": [], "importance": 9.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "house_4", "working"),
             ScheduleEntry(9.0, "house_5", "working"),  # house call
@@ -213,6 +250,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Tom works at the workshop with Oleg. He and Lisa have financial struggles and argue about money sometimes.",
         wealth=250,
         color_index=7,
+        secrets=[{"content": "I have been gambling secretly and hiding my losses from Lisa", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "workshop", "working"),
             ScheduleEntry(12.0, "house_3", "eating"),
@@ -237,6 +275,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Lisa helps at the school and tries to stretch every coin. The financial stress shows in her arguments with Tom.",
         wealth=250,
         color_index=8,
+        secrets=[{"content": "I have been skimming small amounts from the school supply budget to buy food for my family", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "school", "working"),
             ScheduleEntry(12.0, "house_3", "eating"),
@@ -261,6 +300,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Marcus is the town's part-time handyman. He and Jade are the newest arrivals, still building relationships.",
         wealth=200,
         color_index=9,
+        secrets=[{"content": "I have a criminal record from before moving to this town that no one here knows about", "known_by": [], "importance": 9.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "town_hall", "working"),
             ScheduleEntry(9.0, "workshop", "working"),
@@ -285,6 +325,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Jade is an aspiring artist who sells crafts. She's creative and expressive but worries about making enough to contribute.",
         wealth=200,
         color_index=10,
+        secrets=[{"content": "Some of my crafts are actually forged copies of famous artworks that I sell as originals", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(8.0, "house_4", "working"),  # crafting
             ScheduleEntry(11.0, "general_store", "selling"),
@@ -309,6 +350,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Henry is a town elder with strong opinions and lots of stories. Retired and often on the park bench, he watches the town change.",
         wealth=350,
         color_index=11,
+        secrets=[{"content": "I am sitting on a large inheritance that I have never told Jake about", "known_by": [], "importance": 7.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "house_5", "eating"),
             ScheduleEntry(8.0, "park", "reflecting"),
@@ -334,6 +376,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Jake is restless and wants to leave for the city. He works odd jobs reluctantly and clashes with his grandfather about the future.",
         wealth=80,
         color_index=12,
+        secrets=[{"content": "I have already secretly bought a one-way ticket to leave town and start a new life in the city", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(8.0, "house_5", "eating"),
             ScheduleEntry(9.0, "farm", "working"),
@@ -358,6 +401,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Clara is the town's unofficial journalist. She writes a small newsletter and documents everything. Nosy but well-intentioned.",
         wealth=200,
         color_index=13,
+        secrets=[{"content": "I fabricated a major story in my newsletter last year and I am terrified someone will find out", "known_by": [], "importance": 8.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(7.0, "house_6", "working"),  # writing
             ScheduleEntry(9.0, "town_hall", "working"),  # reporting
@@ -384,6 +428,7 @@ AGENT_PROFILES: list[AgentProfile] = [
         backstory="Reverend Park runs the church and is the moral compass of town. He mediates disputes but is secretly questioning his faith.",
         wealth=300,
         color_index=14,
+        secrets=[{"content": "I have completely lost my faith and have been faking my devotion for years", "known_by": [], "importance": 9.0, "discovered_tick": None}],
         schedule=[
             ScheduleEntry(6.0, "church", "reflecting"),
             ScheduleEntry(8.0, "church", "working"),

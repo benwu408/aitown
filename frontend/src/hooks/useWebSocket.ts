@@ -39,6 +39,8 @@ export function useWebSocket() {
           store.getState().setAgentDetail(msg.data);
         } else if (msg.type === "dashboard_data") {
           store.getState().setDashboardData(msg.data);
+        } else if (msg.type === "autobiography") {
+          store.getState().setAutobiography(msg.data);
         }
       } catch (e) {
         console.error("Failed to parse WS message:", e);

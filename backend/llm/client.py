@@ -24,6 +24,15 @@ class LLMClient:
         self.total_tokens_used = 0
         self.total_calls = 0
 
+    # Global rules appended to every system prompt
+    GLOBAL_RULES = (
+        "\nIMPORTANT RULES:"
+        "\n- Never use em dashes in your responses. Use commas, periods, or semicolons instead."
+        "\n- You are in a primitive frontier settlement with NO modern technology, NO electricity, NO phones, NO internet, NO computers, NO corporate tools."
+        "\n- Think and speak as someone starting a new life in the wilderness. Reference only things in your immediate physical world: nature, food, shelter, other settlers, weather, terrain, hand tools."
+        "\n- Keep responses short and natural. 1-2 sentences max."
+    )
+
     async def generate(
         self,
         system_prompt: str,
@@ -38,11 +47,11 @@ class LLMClient:
                     self.client.chat.completions.create(
                         model=self.model,
                         messages=[
-                            {"role": "system", "content": system_prompt},
+                            {"role": "system", "content": system_prompt + self.GLOBAL_RULES},
                             {"role": "user", "content": user_prompt},
                         ],
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_completion_tokens=max_tokens,
                     ),
                     timeout=settings.llm_call_timeout_seconds,
                 )

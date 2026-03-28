@@ -4,7 +4,7 @@ import { AGENT_COLORS } from "../../utils/formatting";
 import MindTab from "./MindTab";
 import RelationshipsTab from "./RelationshipsTab";
 
-const TABS = ["Status", "Mind", "Relations", "Econ"] as const;
+const TABS = ["Status", "Mind", "Relations", "Skills"] as const;
 type Tab = (typeof TABS)[number];
 
 interface Props {
@@ -27,32 +27,50 @@ export default function InspectorPanel({ onInspect }: Props) {
             Inspector
           </h2>
         </div>
-        <div className="flex-1 p-4">
+        <div className="flex-1 overflow-y-auto p-4">
           <p className="text-sm text-gray-500">
             Click an agent to inspect their mind, memories, and relationships.
           </p>
           {/* Agent list */}
-          <div className="mt-4 space-y-1">
-            {Object.values(agents).map((a) => (
-              <button
-                key={a.id}
-                onClick={() => onInspect(a.id)}
-                className="w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-800 text-left"
-              >
-                <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-bold"
-                  style={{
-                    backgroundColor: `#${(AGENT_COLORS[a.colorIndex % AGENT_COLORS.length]).toString(16).padStart(6, "0")}`,
-                  }}
+          <div className="mt-3 space-y-1.5">
+            {Object.values(agents).map((a) => {
+              const color = AGENT_COLORS[a.colorIndex % AGENT_COLORS.length];
+              const moodPct = Math.round(a.state.mood * 100);
+              const moodColor = moodPct > 60 ? "bg-green-500" : moodPct > 30 ? "bg-yellow-500" : "bg-red-500";
+              const summary = (a as any).summary || `${a.age}yo ${a.job}`;
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => onInspect(a.id)}
+                  className="w-full p-2 rounded hover:bg-gray-800/80 text-left border border-transparent hover:border-gray-700"
                 >
-                  {a.name[0]}
-                </div>
-                <span className="text-xs text-gray-300">{a.name}</span>
-                <span className="text-[10px] text-gray-600 ml-auto">
-                  {a.currentAction}
-                </span>
-              </button>
-            ))}
+                  <div className="flex items-center gap-2 mb-1">
+                    <div
+                      className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[8px] font-bold shrink-0"
+                      style={{ backgroundColor: `#${color.toString(16).padStart(6, "0")}` }}
+                    >
+                      {a.name[0]}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-gray-200 font-medium">{a.name}</span>
+                        <span className="text-[9px] text-gray-600">{a.emotion}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-gray-500 leading-tight line-clamp-2 mb-1">
+                    {summary}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] text-gray-600">{a.currentAction}</span>
+                    <div className="flex-1 bg-gray-800 rounded-full h-1">
+                      <div className={`${moodColor} h-1 rounded-full`} style={{ width: `${moodPct}%` }} />
+                    </div>
+                    <span className="text-[9px] text-amber-400">{a.state.wealth}c</span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -79,7 +97,7 @@ export default function InspectorPanel({ onInspect }: Props) {
             </div>
           </div>
           <button
-            onClick={() => useSimulationStore.getState().selectAgent(null)}
+            onClick={() => { useSimulationStore.getState().selectAgent(null); useSimulationStore.getState().setFollowAgent(null); }}
             className="ml-auto text-gray-500 hover:text-gray-200 text-xs flex items-center gap-1 px-2 py-0.5 rounded hover:bg-gray-800"
           >
             {"<"} Back
@@ -111,7 +129,7 @@ export default function InspectorPanel({ onInspect }: Props) {
         {tab === "Relations" && (
           <RelationshipsTab agent={agent} detail={detail} onInspect={onInspect} />
         )}
-        {tab === "Econ" && <EconContent agent={agent} detail={detail} />}
+        {tab === "Skills" && <EconContent agent={agent} detail={detail} />}
       </div>
     </div>
   );
@@ -163,40 +181,64 @@ function StatusContent({ agent, detail }: { agent: any; detail: any }) {
 }
 
 function EconContent({ agent, detail }: { agent: any; detail: any }) {
-  const transactions = detail?.transactions || [];
+  const inventory = (agent as any)?.inventory || detail?.inventory || [];
+  const skills = detail?.skills || {};
+  const physicalTraits = detail?.physicalTraits || {};
 
   return (
     <div className="space-y-3 text-xs">
-      <div className="text-2xl text-amber-400 font-bold">
-        {agent.state.wealth} <span className="text-sm text-gray-500">coins</span>
+      <div className="text-sm text-gray-300 font-medium">
+        Role: {agent.job || "newcomer"}
       </div>
 
-      <div className="space-y-1">
-        <Row label="Job" value={agent.job} />
-        <Row label="Workplace" value={agent.currentLocation.replace(/_/g, " ")} />
-      </div>
-
-      <div className="pt-2 border-t border-gray-800">
-        <div className="text-[10px] text-gray-500 uppercase mb-1">
-          Transaction History ({transactions.length})
+      {/* Physical Traits */}
+      {Object.keys(physicalTraits).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Physical Traits</div>
+          <div className="space-y-1">
+            {Object.entries(physicalTraits).map(([trait, val]: [string, any]) => (
+              <BarRow key={trait} label={trait} value={val} color="bg-blue-500" />
+            ))}
+          </div>
         </div>
-        {transactions.length === 0 ? (
-          <p className="text-gray-600 italic">No transactions yet</p>
+      )}
+
+      {/* Skills */}
+      <div>
+        <div className="text-[10px] text-gray-500 uppercase mb-1">
+          Discovered Skills ({Object.keys(skills).length})
+        </div>
+        {Object.keys(skills).length === 0 ? (
+          <p className="text-gray-600 italic">No skills discovered yet</p>
         ) : (
-          <div className="space-y-0.5 max-h-48 overflow-y-auto">
-            {[...transactions].reverse().map((t: any, i: number) => (
-              <div
-                key={i}
-                className={`flex justify-between py-0.5 ${
-                  t.action === "buy" ? "text-red-400" : "text-green-400"
-                }`}
-              >
-                <span>
-                  {t.action === "buy" ? "Bought" : "Sold"} {t.item}
-                </span>
-                <span>
-                  {t.action === "buy" ? "-" : "+"}{t.price} coins
-                </span>
+          <div className="space-y-1">
+            {Object.entries(skills).sort((a: any, b: any) => (b[1].skill_level || 0) - (a[1].skill_level || 0)).map(([name, data]: [string, any]) => (
+              <div key={name} className="flex items-center justify-between">
+                <span className="text-gray-300 capitalize">{name.replace(/_/g, " ")}</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-16 bg-gray-800 rounded-full h-1.5">
+                    <div className="bg-amber-500 h-1.5 rounded-full" style={{ width: `${(data.skill_level || 0) * 100}%` }} />
+                  </div>
+                  <span className="text-[9px] text-gray-500">{data.attempts || 0}x</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Inventory */}
+      <div>
+        <div className="text-[10px] text-gray-500 uppercase mb-1">
+          Inventory ({inventory.length})
+        </div>
+        {inventory.length === 0 ? (
+          <p className="text-gray-600 italic">Empty hands</p>
+        ) : (
+          <div className="space-y-0.5">
+            {inventory.map((item: any, i: number) => (
+              <div key={i} className="text-gray-400">
+                {item.name || item} {item.quantity ? `(${item.quantity})` : ""}
               </div>
             ))}
           </div>

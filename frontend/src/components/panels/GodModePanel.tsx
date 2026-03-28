@@ -220,6 +220,37 @@ export default function GodModePanel({ onSend, onClose }: Props) {
               </button>
             </div>
           </div>
+
+          {/* World Edit */}
+          <div>
+            <h3 className="text-xs text-gray-400 uppercase mb-2">
+              Build Structure
+            </h3>
+            <div className="grid grid-cols-3 gap-2">
+              {["house", "bakery", "workshop", "tavern", "clinic", "general_store", "barn", "church", "school"].map((type) => (
+                <button
+                  key={type}
+                  onClick={() => {
+                    onSend({
+                      type: "god_command",
+                      command: "world_edit",
+                      params: {
+                        action: "build",
+                        col: 0, row: 0, // will use find_empty_space
+                        width: 2, height: 2,
+                        structure_type: type,
+                        label: `New ${type.charAt(0).toUpperCase() + type.slice(1)}`,
+                        auto_place: true,
+                      },
+                    });
+                  }}
+                  className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-[10px] text-gray-300 capitalize"
+                >
+                  {type.replace("_", " ")}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

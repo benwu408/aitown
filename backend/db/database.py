@@ -26,7 +26,8 @@ async def init_db():
                 season TEXT,
                 weather TEXT,
                 economy_json TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                world_json TEXT DEFAULT '{}'
             )
         """)
         await db.execute("""
@@ -56,11 +57,23 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migrate: add transactions_json column if missing
+        # Migrate world_state table
         try:
-            await db.execute("SELECT transactions_json FROM agent_state LIMIT 1")
+            await db.execute("SELECT world_json FROM world_state LIMIT 1")
         except Exception:
-            await db.execute("ALTER TABLE agent_state ADD COLUMN transactions_json TEXT DEFAULT '[]'")
+            await db.execute("ALTER TABLE world_state ADD COLUMN world_json TEXT DEFAULT '{}'")
+
+        # Migrations: add columns if missing
+        for col, default in [
+            ("transactions_json", "'[]'"),
+            ("secrets_json", "'[]'"),
+            ("goals_json", "'[]'"),
+            ("opinions_json", "'{}'"),
+        ]:
+            try:
+                await db.execute(f"SELECT {col} FROM agent_state LIMIT 1")
+            except Exception:
+                await db.execute(f"ALTER TABLE agent_state ADD COLUMN {col} TEXT DEFAULT {default}")
 
         await db.commit()
     logger.info(f"Database initialized at {DB_PATH}")
@@ -71,15 +84,17 @@ async def save_world_state(engine) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             economy_json = json.dumps(engine.economy.to_dict()) if hasattr(engine, "economy") else "{}"
+            world_json = json.dumps(engine.world.to_save_dict()) if hasattr(engine, "world") else "{}"
             await db.execute("""
-                INSERT OR REPLACE INTO world_state (id, tick, day, season, weather, economy_json)
-                VALUES (1, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO world_state (id, tick, day, season, weather, economy_json, world_json)
+                VALUES (1, ?, ?, ?, ?, ?, ?)
             """, (
                 engine.tick,
                 engine.time_manager.day,
                 engine.time_manager.season,
                 engine.time_manager.weather,
                 economy_json,
+                world_json,
             ))
 
             for agent in engine.agents.values():
@@ -87,8 +102,9 @@ async def save_world_state(engine) -> None:
                     INSERT OR REPLACE INTO agent_state
                     (agent_id, name, position_json, state_json, memories_json,
                      relationships_json, inner_thought, daily_plan, emotion,
-                     current_location, current_action, transactions_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     current_location, current_action, transactions_json,
+                     secrets_json, goals_json, opinions_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     agent.id,
                     agent.name,
@@ -107,6 +123,9 @@ async def save_world_state(engine) -> None:
                     agent.current_location,
                     agent.current_action.value,
                     json.dumps(agent.transactions[-50:]),
+                    json.dumps(agent.secrets),
+                    json.dumps(agent.active_goals),
+                    json.dumps(agent.opinions),
                 ))
 
             await db.commit()
@@ -136,6 +155,17 @@ async def load_world_state() -> dict | None:
                 "economy": json.loads(row[5]) if row[5] else {},
                 "agents": {},
             }
+            # world_json may be at different index depending on migration
+            for i in range(6, len(row)):
+                val = row[i]
+                if isinstance(val, str) and val.startswith('{') and len(val) > 5:
+                    try:
+                        parsed = json.loads(val)
+                        if "tiles" in parsed or "buildings" in parsed:
+                            result["world"] = parsed
+                            break
+                    except json.JSONDecodeError:
+                        pass
 
             # Load all agent states
             cursor = await db.execute("SELECT * FROM agent_state")
@@ -155,6 +185,9 @@ async def load_world_state() -> dict | None:
                     "current_location": arow[9] or "",
                     "current_action": arow[10] or "idle",
                     "transactions": json.loads(arow[11]) if len(arow) > 11 and arow[11] else [],
+                    "secrets": json.loads(arow[12]) if len(arow) > 12 and arow[12] else [],
+                    "active_goals": json.loads(arow[13]) if len(arow) > 13 and arow[13] else [],
+                    "opinions": json.loads(arow[14]) if len(arow) > 14 and arow[14] else {},
                 }
 
             logger.info(f"Loaded save: tick {result['tick']}, day {result['day']}, {len(result['agents'])} agents")

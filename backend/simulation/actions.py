@@ -19,6 +19,7 @@ class ActionType(str, Enum):
     CELEBRATING = "celebrating"
     STEALING = "stealing"
     GIVING = "giving"
+    BUILDING = "building"
     ANNOUNCING = "announcing"
 
 

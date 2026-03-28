@@ -1,5 +1,11 @@
 from pydantic_settings import BaseSettings
 
+# Simulation timing — HARDCODED, not overridable by .env
+# (The .env file may contain old values from a previous version)
+TICK_DURATION_MS = 100      # Real-time ms between ticks (before speed multiplier)
+TICKS_PER_DAY = 480         # 1 tick = 3 sim-minutes. Full day = 480 ticks.
+REFLECTION_INTERVAL = 60    # Ticks between reflection cycles
+
 
 class Settings(BaseSettings):
     # LLM
@@ -12,12 +18,6 @@ class Settings(BaseSettings):
     # Embeddings
     embedding_model_name: str = "all-MiniLM-L6-v2"
     embedding_base_url: str = ""
-
-    # Simulation
-    tick_duration_ms: int = 200
-    ticks_per_day: int = 288
-    reflection_interval: int = 80
-    max_memories_per_retrieval: int = 15
 
     # Server
     backend_port: int = 8000

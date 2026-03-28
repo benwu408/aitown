@@ -7,7 +7,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from simulation.engine import SimulationEngine
+from simulation.engine_v2 import SimulationEngineV2 as SimulationEngine
 
 logger = logging.getLogger("agentica")
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,8 @@ async def lifespan(app: FastAPI):
     logger.info("Simulation engine started")
     yield
     engine.stop()
+    # Give the save task a moment to complete
+    await asyncio.sleep(0.5)
     logger.info("Simulation engine stopped")
 
 
@@ -89,6 +91,10 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "request_dashboard":
                 data = engine.get_dashboard_data()
                 await ws.send_text(json.dumps({"type": "dashboard_data", "data": data}))
+            elif msg_type == "request_autobiography":
+                agent_id = msg.get("agentId")
+                text = await engine.generate_autobiography(agent_id)
+                await ws.send_text(json.dumps({"type": "autobiography", "data": {"agentId": agent_id, "text": text}}))
             elif msg_type == "god_command":
                 engine.handle_god_command(msg.get("command"), msg.get("params", {}))
             else:

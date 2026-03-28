@@ -21,6 +21,12 @@ interface SimulationState {
   selectedAgentDetail: AgentDetail | null;
   feed: FeedEntry[];
   dashboardData: any | null;
+  followAgentId: string | null;
+  autobiography: { agentId: string; text: string } | null;
+  storyHighlights: any[];
+  buildings: any[];
+  tileGrid: any[][] | null;
+  speechBubbles: Array<{ agentId: string; text: string; expires: number }>;
 
   setConnected: (v: boolean) => void;
   updateFromTick: (data: {
@@ -40,6 +46,8 @@ interface SimulationState {
   setAgentDetail: (detail: AgentDetail | null) => void;
   setSpeed: (speed: number) => void;
   setDashboardData: (data: any) => void;
+  setFollowAgent: (id: string | null) => void;
+  setAutobiography: (data: { agentId: string; text: string } | null) => void;
 }
 
 let feedCounter = 0;
@@ -54,6 +62,12 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   selectedAgentDetail: null,
   feed: [],
   dashboardData: null,
+  followAgentId: null,
+  autobiography: null,
+  storyHighlights: [],
+  buildings: [],
+  tileGrid: null,
+  speechBubbles: [],
 
   setConnected: (v) => set({ connected: v }),
 
@@ -67,17 +81,33 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       time: data.time,
       speed: data.speed,
       agents,
+      buildings: (data as any).buildings || [],
+      tileGrid: (data as any).tileGrid || null,
     });
   },
 
   updateFromTick: (data) => {
-    const agents: Record<string, AgentData> = {};
+    // Merge agent data — lightweight ticks only have position/action, full ticks have everything
+    const prevAgents = get().agents;
+    const agents: Record<string, AgentData> = { ...prevAgents };
     for (const a of data.agents) {
-      agents[a.id] = a;
+      if (a.state) {
+        // Full agent data — replace entirely
+        agents[a.id] = a;
+      } else {
+        // Lightweight — only update position/action/emotion, keep rest
+        const existing = agents[a.id];
+        if (existing) {
+          agents[a.id] = { ...existing, position: a.position, currentAction: a.currentAction, currentLocation: a.currentLocation, emotion: a.emotion || existing.emotion };
+        } else {
+          agents[a.id] = a as any;
+        }
+      }
     }
 
     // Generate feed entries from events
     const newFeedEntries: FeedEntry[] = [];
+    const newSpeechBubbles: Array<{ agentId: string; text: string; expires: number }> = [];
     for (const event of data.events) {
       const agent = agents[event.agentId || ""];
       let text = "";
@@ -106,6 +136,14 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
         text = `${agent.name} is ${event.action} at ${formatLocation(agent.currentLocation)}`;
       } else if (event.type === "agent_speak") {
         text = `${agent.name}: "${event.speech}"`;
+        // Create speech bubble for the map
+        if (event.agentId && event.speech) {
+          newSpeechBubbles.push({
+            agentId: event.agentId,
+            text: event.speech,
+            expires: Date.now() + 4000,  // 4 seconds
+          });
+        }
       }
 
       if (text) {
@@ -121,18 +159,51 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       }
     }
 
-    set((state) => ({
-      tick: data.tick,
-      time: data.time,
-      agents,
-      feed: [...newFeedEntries, ...state.feed].slice(0, 200),
-    }));
+    // Apply tile changes if any
+    const tileChanges = (data as any).tileChanges;
+
+    set((state) => {
+      // Update tile grid if we have changes
+      let tileGrid = state.tileGrid;
+      if (tileChanges && tileGrid) {
+        tileGrid = tileGrid.map(row => [...row]);
+        for (const change of tileChanges) {
+          if (tileGrid[change.row]) {
+            tileGrid[change.row] = [...tileGrid[change.row]];
+            tileGrid[change.row][change.col] = change.tile;
+          }
+        }
+      }
+
+      return {
+        tick: data.tick,
+        time: data.time,
+        agents,
+        feed: [...newFeedEntries, ...state.feed].slice(0, 200),
+        speechBubbles: (() => {
+          // Merge: new bubbles replace existing ones from the same agent
+          const merged = new Map<string, { agentId: string; text: string; expires: number }>();
+          for (const b of state.speechBubbles) {
+            if (b.expires > Date.now()) merged.set(b.agentId, b);
+          }
+          for (const b of newSpeechBubbles) {
+            merged.set(b.agentId, b); // newer replaces older
+          }
+          return [...merged.values()].slice(0, 10);
+        })(),
+        storyHighlights: (data as any).storyHighlights || state.storyHighlights,
+        ...(tileGrid ? { tileGrid } : {}),
+        ...((data as any).buildings ? { buildings: (data as any).buildings } : {}),
+      };
+    });
   },
 
   selectAgent: (id) => set({ selectedAgentId: id, selectedAgentDetail: null }),
   setAgentDetail: (detail) => set({ selectedAgentDetail: detail }),
   setSpeed: (speed) => set({ speed }),
-  setDashboardData: (data: any) => set({ dashboardData: data }),
+  setDashboardData: (data: any) => set({ dashboardData: data, storyHighlights: data?.storyHighlights || [] }),
+  setFollowAgent: (id) => set({ followAgentId: id }),
+  setAutobiography: (data) => set({ autobiography: data }),
 }));
 
 function formatLocation(id: string): string {
