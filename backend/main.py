@@ -48,9 +48,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(engine.run())
     logger.info("Simulation engine started")
     yield
-    engine.stop()
-    # Give the save task a moment to complete
-    await asyncio.sleep(0.5)
+    await engine.stop()
     logger.info("Simulation engine stopped")
 
 

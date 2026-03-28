@@ -45,27 +45,45 @@ class MetaSimulation:
                 })
                 logger.info(f"Role emergence: {agent.name} → {agent.self_concept}")
 
-        # --- Leadership emergence: who do people talk about most? ---
-        mention_counts: dict[str, int] = {}
-        for agent in agents.values():
-            for ep in agent.episodic_memory.recent(20):
-                for other_name in ep.agents_involved:
-                    mention_counts[other_name] = mention_counts.get(other_name, 0) + 1
+        # --- Leadership emergence: composite influence, not just mentions ---
+        influence_scores: dict[str, float] = {}
+        for candidate in agents.values():
+            mention_score = 0.0
+            trust_score = 0.0
+            reliability_score = 0.0
+            support_score = 0.0
+            for observer in agents.values():
+                if observer.id == candidate.id:
+                    continue
+                for ep in observer.episodic_memory.recent(20):
+                    if candidate.name in ep.agents_involved:
+                        mention_score += 0.2
+                rel = observer.relationships.get(candidate.name, {})
+                trust_score += rel.get("trust", 0.5)
+                model = observer.mental_models.models.get(candidate.name)
+                if model:
+                    reliability_score += model.reliability
+                    support_score += max(0.0, model.leadership_influence + model.alliance_lean * 0.5)
+            influence_scores[candidate.name] = mention_score + trust_score + reliability_score + support_score
 
-        if mention_counts:
-            most_mentioned = max(mention_counts, key=mention_counts.get)
-            if mention_counts[most_mentioned] > len(agents) * 2:
+        if influence_scores:
+            most_influential = max(influence_scores, key=influence_scores.get)
+            threshold = len(agents) * 1.8
+            if influence_scores[most_influential] > threshold:
                 current_leader = world.constitution.governance_rules.get("informal_leader")
-                if current_leader != most_mentioned:
-                    world.constitution.governance_rules["informal_leader"] = most_mentioned
+                if current_leader != most_influential:
+                    world.constitution.governance_rules["informal_leader"] = most_influential
+                    world.constitution.governance_rules["leadership_scores"] = {
+                        name: round(score, 2) for name, score in sorted(influence_scores.items(), key=lambda item: item[1], reverse=True)[:5]
+                    }
                     world.constitution.change_history.append({
                         "tick": tick, "type": "leadership_emergence",
-                        "description": f"{most_mentioned} is becoming the informal leader",
+                        "description": f"{most_influential} is becoming the informal leader",
                     })
                     events.append({
                         "type": "system_event", "eventType": "leadership_emergence",
                         "label": "Informal Leader",
-                        "description": f"{most_mentioned} is emerging as the settlement's informal leader",
+                        "description": f"{most_influential} is emerging as the settlement's informal leader",
                     })
                     self._changes_today += 1
                     self._last_change_tick = tick
@@ -80,8 +98,9 @@ class MetaSimulation:
 
         if evening_locations.get("clearing", 0) > len(agents) * 0.5:
             norm = "People gather at the clearing in the evenings"
-            if norm not in world.constitution.social_norms:
-                world.constitution.social_norms.append(norm)
+            existing_norms = [n["text"] if isinstance(n, dict) else str(n) for n in world.constitution.social_norms]
+            if norm not in existing_norms:
+                world.add_norm(norm, tick, category="gathering", origin="implicit_behavior")
                 world.constitution.change_history.append({
                     "tick": tick, "type": "norm_emergence",
                     "description": norm,
@@ -94,8 +113,9 @@ class MetaSimulation:
 
         # --- Property norm: if most agents have claimed spaces ---
         claimed = sum(1 for loc in world.locations.values() if loc.get("claimed_by"))
-        if claimed >= 3 and "Respect claimed spaces" not in world.constitution.social_norms:
-            world.constitution.social_norms.append("Respect claimed spaces")
+        existing_norms = [n["text"] if isinstance(n, dict) else str(n) for n in world.constitution.social_norms]
+        if claimed >= 3 and "Respect claimed spaces" not in existing_norms:
+            world.add_norm("Respect claimed spaces", tick, category="property", origin="implicit_behavior")
             world.constitution.change_history.append({
                 "tick": tick, "type": "norm_emergence",
                 "description": "Property rights emerging — agents respect claims",
@@ -137,8 +157,16 @@ class MetaSimulation:
                     loc = world.locations[loc_id]
                     inst_name = f"Gathering at {loc.get('label', loc_id)}"
                     world.constitution.institutions.append({
-                        "name": inst_name, "location": loc_id,
-                        "formed_tick": tick, "purpose": "social gathering",
+                        "id": f"institution_{len(world.constitution.institutions) + 1}_{tick}",
+                        "name": inst_name,
+                        "location": loc_id,
+                        "formed_tick": tick,
+                        "purpose": "social gathering",
+                        "members": [a.name for a in agents.values() if a.current_location == loc_id][:6],
+                        "roles": {},
+                        "operating_norm_ids": [],
+                        "legitimacy": 0.5,
+                        "activity_level": 0.4,
                     })
                     world.constitution.change_history.append({
                         "tick": tick, "type": "institution_creation",
@@ -190,7 +218,7 @@ Return JSON:
         )
 
         if result.get("accepted") and result.get("rule_text"):
-            world.constitution.social_norms.append(result["rule_text"])
+            world.add_norm(result["rule_text"], 0, category="proposal", origin="formal_proposal")
             world.constitution.change_history.append({
                 "tick": 0, "type": "proposal_accepted",
                 "description": f"{agent.name} proposed: {result['rule_text']}",

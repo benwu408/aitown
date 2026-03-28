@@ -1,55 +1,60 @@
-# Agentica — AI Civilization Simulator
+# Agentica — Polis V2 Emergent Settlement Simulator
 
-A browser-based AI civilization simulator with 15 LLM-powered autonomous agents who live, work, socialize, trade, and make decisions in a persistent isometric micro-town.
+A browser-based AI settlement simulator where 15 LLM-powered agents wake up in untouched wilderness, discover resources, talk, make plans, and slowly build a town together.
 
 ## Quick Start
 
 ```bash
 # 1. Clone and configure
 cp .env.example .env
-# Edit .env with your LLM API key and endpoint
 
-# 2. Run with Docker Compose
+# 2. Start services
 docker compose up
 
-# 3. Open browser
+# 3. Open the app
 open http://localhost:5173
 ```
 
+Docker rebuilds keep simulation state. The backend stores its SQLite save in the named Docker volume `backend-data` at `/app/data/agentica.db`, so `docker compose up --build` will preserve agents, memories, built structures, and world state unless you explicitly remove the volume.
+
+## What It Does
+
+- Starts from a zero-building wilderness map with a central clearing
+- Simulates 15 autonomous agents with drives, emotions, memories, beliefs, and emerging roles
+- Lets agents discover resource zones, gather food and wood, and build structures over time
+- Runs live conversations that can create follow-up commitments and future actions
+- Persists world state, structures, memories, and agent cognition to SQLite
+- Exposes inspector, dashboard, story highlights, and debug-oriented God Mode tools in the UI
+
 ## Tech Stack
 
-- **Frontend:** React + TypeScript + PixiJS (2D isometric) + Zustand + TailwindCSS
-- **Backend:** FastAPI (Python) + WebSocket + SQLite
-- **LLM:** Any OpenAI-compatible API endpoint
-
-## Features
-
-- **15 autonomous agents** with unique personalities, jobs, goals, and daily schedules
-- **2D isometric town** with 12+ buildings, paths, trees, and decorations
-- **LLM-powered conversations** — agents talk when they meet at social locations
-- **Cognitive architecture** — memory, reflection, daily planning
-- **Economic system** — production, trade, supply/demand pricing
-- **Inspector panel** — click any agent to see thoughts, memories, relationships
-- **Live feed** — scrolling event log of everything happening in town
-- **God mode** — inject events (drought, festival, illness), whisper thoughts to agents
-- **Day/night cycle** with weather effects
-- **Auto-save** to SQLite every ~100 seconds
+- Frontend: React + TypeScript + PixiJS + Zustand + TailwindCSS
+- Backend: FastAPI + WebSocket + SQLite
+- LLM: OpenAI-compatible chat completion endpoint
 
 ## Configuration
 
-All settings in `.env`:
+Important environment variables:
 
 | Variable | Description | Default |
 |---|---|---|
-| `LLM_API_KEY` | API key for LLM endpoint | required |
+| `LLM_API_KEY` | API key for the configured LLM endpoint | required for conversations/thoughts |
 | `LLM_BASE_URL` | OpenAI-compatible base URL | `https://api.openai.com/v1` |
-| `LLM_MODEL_NAME` | Model to use | `gpt-4o-mini` |
-| `TICK_DURATION_MS` | Real-time ms per tick | `2000` |
-| `TICKS_PER_DAY` | Simulation ticks per day | `144` |
+| `LLM_MODEL_NAME` | Chat model used for thoughts and conversations | `gpt-4o-mini` |
+| `LLM_MAX_CONCURRENT_REQUESTS` | Max concurrent LLM calls | `15` |
+| `BACKEND_PORT` | FastAPI port | `8000` |
+| `DB_PATH` | SQLite save path | `data/agentica.db` |
 
-## Architecture
+Under Docker Compose, `DB_PATH` is explicitly set to `/app/data/agentica.db` so persistence survives backend container rebuilds.
 
-The frontend is a **dumb renderer** — it receives action events via WebSocket and maps them to sprites/animations. The backend owns all simulation logic, agent cognition, and economics. LLM calls are async and batched (max 5/tick). Rule-based behavior keeps agents moving even without LLM responses.
+Simulation timing is currently controlled in backend config for the active `v2` runtime.
+
+## Runtime Notes
+
+- The active product runtime is `SimulationEngineV2`
+- Fresh compatible saves start from wilderness with no buildings
+- Older pre-refactor `v2` saves are intentionally ignored
+- God Mode is available as a debug/observer tool, not as the core governing model of the simulation
 
 ## License
 

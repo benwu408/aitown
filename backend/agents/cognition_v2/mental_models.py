@@ -28,6 +28,13 @@ class MentalModel:
     trust: float = 0.5
     comfort_level: float = 0.3
     predictability: float = 0.3
+    reliability: float = 0.5
+    generosity: float = 0.5
+    emotional_safety: float = 0.5
+    leadership_influence: float = 0.0
+    reciprocity_balance: float = 0.0
+    alliance_lean: float = 0.0
+    competence_by_domain: dict[str, float] = field(default_factory=dict)
     relationship_trajectory: str = "new"  # getting_closer, drifting_apart, stable, tense
     unresolved_issues: list[str] = field(default_factory=list)
 
@@ -43,7 +50,9 @@ class MentalModel:
             parts.append(f"  Struggles: {', '.join(self.perceived_struggles[:2])}")
         parts.append(f"  How they handle stress: {self.how_they_handle_stress}")
         parts.append(f"  How they respond to kindness: {self.how_they_respond_to_kindness}")
-        parts.append(f"  Trust: {self.trust:.0%} | Comfort: {self.comfort_level:.0%}")
+        parts.append(
+            f"  Trust: {self.trust:.0%} | Reliability: {self.reliability:.0%} | Emotional safety: {self.emotional_safety:.0%}"
+        )
         if self.unresolved_issues:
             parts.append(f"  Unresolved between you: {', '.join(self.unresolved_issues[:2])}")
         parts.append(f"  Trajectory: {self.relationship_trajectory}")
@@ -60,6 +69,13 @@ class MentalModel:
             "kindness_response": self.how_they_respond_to_kindness,
             "trust": round(self.trust, 2),
             "comfort": round(self.comfort_level, 2),
+            "reliability": round(self.reliability, 2),
+            "generosity": round(self.generosity, 2),
+            "emotional_safety": round(self.emotional_safety, 2),
+            "leadership_influence": round(self.leadership_influence, 2),
+            "reciprocity_balance": round(self.reciprocity_balance, 2),
+            "alliance_lean": round(self.alliance_lean, 2),
+            "competence_by_domain": self.competence_by_domain,
             "trajectory": self.relationship_trajectory,
             "unresolved": self.unresolved_issues,
         }
@@ -76,6 +92,13 @@ class MentalModel:
             how_they_respond_to_kindness=d.get("kindness_response", ""),
             trust=d.get("trust", 0.5),
             comfort_level=d.get("comfort", 0.3),
+            reliability=d.get("reliability", 0.5),
+            generosity=d.get("generosity", 0.5),
+            emotional_safety=d.get("emotional_safety", 0.5),
+            leadership_influence=d.get("leadership_influence", 0.0),
+            reciprocity_balance=d.get("reciprocity_balance", 0.0),
+            alliance_lean=d.get("alliance_lean", 0.0),
+            competence_by_domain=d.get("competence_by_domain", {}),
             relationship_trajectory=d.get("trajectory", "new"),
             unresolved_issues=d.get("unresolved", []),
         )
@@ -91,13 +114,29 @@ class MentalModelSystem:
         return self.models[name]
 
     def update_from_interaction(self, name: str, tick: int, perception: str = "",
-                                trust_delta: float = 0, comfort_delta: float = 0):
+                                trust_delta: float = 0, comfort_delta: float = 0,
+                                reliability_delta: float = 0, generosity_delta: float = 0,
+                                emotional_safety_delta: float = 0, alliance_delta: float = 0,
+                                leadership_delta: float = 0, domain: str = "", competence_delta: float = 0):
         model = self.get_or_create(name)
         model.last_updated = tick
         if trust_delta:
             model.trust = max(0.0, min(1.0, model.trust + trust_delta))
         if comfort_delta:
             model.comfort_level = max(0.0, min(1.0, model.comfort_level + comfort_delta))
+        if reliability_delta:
+            model.reliability = max(0.0, min(1.0, model.reliability + reliability_delta))
+        if generosity_delta:
+            model.generosity = max(0.0, min(1.0, model.generosity + generosity_delta))
+        if emotional_safety_delta:
+            model.emotional_safety = max(0.0, min(1.0, model.emotional_safety + emotional_safety_delta))
+        if alliance_delta:
+            model.alliance_lean = max(-1.0, min(1.0, model.alliance_lean + alliance_delta))
+        if leadership_delta:
+            model.leadership_influence = max(0.0, min(1.0, model.leadership_influence + leadership_delta))
+        if domain:
+            current = model.competence_by_domain.get(domain, 0.3)
+            model.competence_by_domain[domain] = max(0.0, min(1.0, current + competence_delta))
         if perception:
             model.perceived_personality = perception
 

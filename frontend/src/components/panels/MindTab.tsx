@@ -32,8 +32,11 @@ interface Props {
 
 export default function MindTab({ agent, detail }: Props) {
   const activeGoals = (detail as any)?.activeGoals || [];
+  const longTermGoals = (detail as any)?.longTermGoals || [];
+  const activeIntentions = (detail as any)?.activeIntentions || [];
   const secrets = (detail as any)?.secrets || [];
   const opinions = (detail as any)?.opinions || {};
+  const workingItems = agent.workingMemory?.items || [];
 
   return (
     <div className="space-y-3 text-xs">
@@ -119,6 +122,86 @@ export default function MindTab({ agent, detail }: Props) {
         )}
       </div>
 
+      {longTermGoals.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Long-Term Goals ({longTermGoals.length})
+          </div>
+          <div className="space-y-1">
+            {longTermGoals.map((goal: any, i: number) => (
+              <div key={i} className="p-1.5 bg-blue-950/20 border border-blue-900/30 rounded text-[10px]">
+                <div className="text-blue-300">{goal.text}</div>
+                {goal.why && <div className="text-gray-500 mt-0.5">{goal.why}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeIntentions.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Active Intentions ({activeIntentions.length})
+          </div>
+          <div className="space-y-1">
+            {activeIntentions.map((intent: any, i: number) => (
+              <div key={i} className="p-1.5 bg-cyan-950/20 border border-cyan-900/30 rounded text-[10px]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-cyan-300">{intent.goal}</span>
+                  <span className="text-[9px] text-gray-500">{intent.source}</span>
+                </div>
+                {intent.why && <div className="text-gray-500 mt-0.5">{intent.why}</div>}
+                <div className="text-[9px] text-gray-600 mt-0.5">
+                  next: {intent.next_step || "none"} | urgency: {intent.urgency?.toFixed?.(2) ?? intent.urgency}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.currentPlan && (
+        <div className="p-2 bg-amber-950/20 border border-amber-900/30 rounded">
+          <div className="text-[10px] text-amber-400 uppercase mb-1">Current Plan</div>
+          <div className="text-gray-300">{(detail as any).currentPlan.goal}</div>
+          {(detail as any).currentPlan.why && <div className="text-[10px] text-gray-500 mt-1">{(detail as any).currentPlan.why}</div>}
+          {Array.isArray((detail as any).currentPlan.candidate_steps) && (detail as any).currentPlan.candidate_steps.length > 0 && (
+            <div className="mt-1 space-y-0.5">
+              {(detail as any).currentPlan.candidate_steps.slice(0, 4).map((step: string, i: number) => (
+                <div key={i} className={`text-[10px] ${i === ((detail as any).currentPlan.step_index || 0) ? "text-amber-200" : "text-gray-500"}`}>
+                  {i === ((detail as any).currentPlan.step_index || 0) ? ">" : "-"} {step}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(detail as any)?.fallbackPlan && (
+        <div className="p-2 bg-gray-800/50 rounded">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Fallback Plan</div>
+          <div className="text-gray-400">{(detail as any).fallbackPlan.goal}</div>
+          {Array.isArray((detail as any).fallbackPlan.steps) && (
+            <div className="mt-1 text-[10px] text-gray-500">
+              {(detail as any).fallbackPlan.steps.join(" then ")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(detail as any)?.blockedReasons && (detail as any).blockedReasons.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Blocked Reasons</div>
+          <div className="space-y-1">
+            {(detail as any).blockedReasons.slice(0, 4).map((blocked: any, i: number) => (
+              <div key={i} className="p-1.5 bg-red-950/20 border border-red-900/30 rounded text-[10px] text-red-200">
+                {blocked.reason}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Opinions */}
       {Object.keys(opinions).length > 0 && (
         <div>
@@ -165,10 +248,11 @@ export default function MindTab({ agent, detail }: Props) {
           <div className="space-y-1">
             {(detail as any).socialCommitments.map((c: any, i: number) => (
               <div key={i} className="p-1.5 bg-cyan-900/15 border border-cyan-900/30 rounded text-[10px]">
-                <div className="text-cyan-300">{c.what}</div>
+                <div className="text-cyan-300">{c.description || c.what}</div>
                 <div className="text-gray-500">
-                  {c.where?.replace(/_/g, " ")}
+                  {(c.location || c.where || "").replace(/_/g, " ")}
                   {c.with && c.with.length > 0 && ` with ${c.with.join(", ")}`}
+                  {c.scheduled_hour !== undefined && ` at ${c.scheduled_hour}:00`}
                   {c.recurring && <span className="ml-1 text-amber-500">(recurring)</span>}
                 </div>
               </div>
@@ -177,12 +261,45 @@ export default function MindTab({ agent, detail }: Props) {
         </div>
       )}
 
+      {(detail as any)?.schedule && (detail as any).schedule.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Daily Schedule ({(detail as any).schedule.length})
+          </div>
+          <div className="space-y-1">
+            {(detail as any).schedule.map((step: any, i: number) => {
+              const isCurrent =
+                (detail as any)?.currentPlanStep?.hour === step.hour &&
+                (detail as any)?.currentPlanStep?.activity === step.activity;
+              return (
+                <div
+                  key={i}
+                  className={`p-1.5 rounded border text-[10px] ${
+                    isCurrent
+                      ? "bg-amber-900/15 border-amber-700/40 text-amber-200"
+                      : "bg-gray-800/20 border-gray-800 text-gray-400"
+                  }`}
+                >
+                  <div>{step.label || `${String(step.hour).padStart(2, "0")}:00 ${step.activity}`}</div>
+                  <div className="text-gray-500">{(step.location || "").replace(/_/g, " ")}</div>
+                </div>
+              );
+            })}
+          </div>
+          {(detail as any)?.planDeviationReason && (
+            <div className="mt-1 text-[10px] text-red-300/80">
+              Off-plan because of {(detail as any).planDeviationReason}.
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Working Memory */}
-      {agent.workingMemory && agent.workingMemory.items?.length > 0 && (
+      {agent.workingMemory && workingItems.length > 0 && (
         <div>
           <div className="text-[10px] text-gray-500 uppercase mb-1">Working Memory</div>
           <div className="space-y-0.5">
-            {agent.workingMemory.items.map((item: string, i: number) => (
+            {workingItems.map((item: string, i: number) => (
               <div key={i} className="text-[10px] text-gray-400 p-1 bg-gray-800/30 rounded">
                 {i === 0 && <span className="text-amber-400 mr-1">[focus]</span>}
                 {item}
@@ -241,8 +358,96 @@ export default function MindTab({ agent, detail }: Props) {
             {Object.entries((detail as any).mentalModels).slice(0, 5).map(([name, model]: [string, any]) => (
               <div key={name} className="text-[10px] p-1 bg-gray-800/30 rounded">
                 <span className="text-gray-300">{name}</span>
-                <span className="text-gray-600 ml-1">trust:{model.trust?.toFixed(1)} comfort:{model.comfort?.toFixed(1)}</span>
+                <span className="text-gray-600 ml-1">
+                  trust:{model.trust?.toFixed(1)} reliability:{model.reliability?.toFixed?.(1) ?? model.reliability} safety:{model.emotional_safety?.toFixed?.(1) ?? model.emotional_safety}
+                </span>
                 {model.personality && <div className="text-[9px] text-gray-500 mt-0.5">{model.personality.slice(0, 60)}</div>}
+                <div className="text-[9px] text-gray-600 mt-0.5">
+                  alliance:{model.alliance_lean?.toFixed?.(1) ?? model.alliance_lean} influence:{model.leadership_influence?.toFixed?.(1) ?? model.leadership_influence}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.lifeEvents && (detail as any).lifeEvents.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Life Events</div>
+          <div className="space-y-1">
+            {(detail as any).lifeEvents.slice(0, 5).map((event: any, i: number) => (
+              <div key={i} className="p-1.5 bg-gray-800/20 border border-gray-800 rounded text-[10px]">
+                <div className="text-gray-300">{event.summary}</div>
+                <div className="text-gray-600">{event.category} | impact {event.impact}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.proposalStances && Object.keys((detail as any).proposalStances).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Proposal Stances</div>
+          <div className="space-y-1">
+            {Object.entries((detail as any).proposalStances).slice(0, 5).map(([proposalId, stance]: [string, any]) => (
+              <div key={proposalId} className="p-1.5 bg-gray-800/20 border border-gray-800 rounded text-[10px]">
+                <div className="text-gray-300">{proposalId}</div>
+                <div className="text-gray-500">{stance.stance} | legitimacy {stance.legitimacy}</div>
+                {stance.reason && <div className="text-gray-600">{stance.reason}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.projectRoles && (detail as any).projectRoles.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Project Roles</div>
+          <div className="space-y-1">
+            {(detail as any).projectRoles.slice(0, 5).map((role: any, i: number) => (
+              <div key={i} className="text-[10px] p-1 bg-gray-800/20 rounded text-gray-400">
+                {role.project_id}: {role.role}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.currentInstitutionRoles && (detail as any).currentInstitutionRoles.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Institution Roles</div>
+          <div className="space-y-1">
+            {(detail as any).currentInstitutionRoles.slice(0, 5).map((role: any, i: number) => (
+              <div key={i} className="text-[10px] p-1 bg-gray-800/20 rounded text-gray-400">
+                {role.institution_name}: {role.role}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.activeConflicts && (detail as any).activeConflicts.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Active Conflicts</div>
+          <div className="space-y-1">
+            {(detail as any).activeConflicts.slice(0, 5).map((conflict: any, i: number) => (
+              <div key={i} className="p-1.5 bg-red-950/20 border border-red-900/30 rounded text-[10px]">
+                <div className="text-red-200">{conflict.with}</div>
+                <div className="text-gray-500">{conflict.summary}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(detail as any)?.reciprocityLedger && Object.keys((detail as any).reciprocityLedger).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Reciprocity</div>
+          <div className="space-y-1">
+            {Object.entries((detail as any).reciprocityLedger).slice(0, 5).map(([name, ledger]: [string, any]) => (
+              <div key={name} className="p-1.5 bg-gray-800/20 border border-gray-800 rounded text-[10px]">
+                <div className="text-gray-300">{name}</div>
+                <div className="text-gray-500">balance: {ledger.balance?.toFixed?.(1) ?? ledger.balance}</div>
               </div>
             ))}
           </div>

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSimulationStore } from "../../stores/simulationStore";
 import { AGENT_COLORS } from "../../utils/formatting";
 
-const TABS = ["overview", "agents", "timeline", "social", "constitution", "resources", "bulletin"] as const;
+const TABS = ["overview", "agents", "timeline", "social", "constitution", "resources"] as const;
 type Tab = (typeof TABS)[number];
 
 const FEED_FILTERS = ["All", "Conversations", "Thoughts", "Transactions", "Events", "Gossip"] as const;
@@ -24,6 +24,81 @@ interface Props {
   onClose: () => void;
 }
 
+function formatStoryHighlight(h: any): { title: string; detail: string } {
+  const raw = String(h?.text || "").trim();
+  const agentName = h?.agentName || "";
+  if (raw.includes(":")) {
+    const [title, ...rest] = raw.split(":");
+    return { title: title.trim(), detail: rest.join(":").trim() };
+  }
+  return { title: agentName || "Story beat", detail: raw };
+}
+
+function buildCurrentSituations(agents: any[], feed: any[]) {
+  const situations: Array<{ key: string; title: string; detail: string; tone: string; priority: number }> = [];
+
+  for (const agent of agents) {
+    const shortName = agent.name?.split(" ")[0] || agent.name || "Someone";
+    if (agent.currentAction === "building") {
+      situations.push({ key: `${agent.id}-building`, title: `${shortName} is building`, detail: agent.currentLocation?.replace(/_/g, " ") || "a shelter site", tone: "border-green-800/50 bg-green-950/20 text-green-200", priority: 100 });
+    } else if (agent.currentAction === "talking") {
+      situations.push({ key: `${agent.id}-talking`, title: `${shortName} is talking`, detail: `near ${agent.currentLocation?.replace(/_/g, " ") || "the settlement"}`, tone: "border-blue-800/50 bg-blue-950/20 text-blue-200", priority: 92 });
+    } else if (agent.currentCommitment) {
+      situations.push({ key: `${agent.id}-commitment`, title: `${shortName} is following through`, detail: agent.currentCommitment.description || "a commitment", tone: "border-cyan-800/50 bg-cyan-950/20 text-cyan-200", priority: 88 });
+    } else if (agent.currentAction === "sleeping") {
+      situations.push({ key: `${agent.id}-sleeping`, title: `${shortName} is asleep`, detail: agent.currentLocation?.replace(/_/g, " ") || "resting", tone: "border-indigo-800/50 bg-indigo-950/20 text-indigo-200", priority: 50 });
+    } else if ((agent.state?.hunger || 0) > 0.78) {
+      situations.push({ key: `${agent.id}-hunger`, title: `${shortName} urgently needs food`, detail: agent.innerThought || "trying to sort out hunger", tone: "border-orange-800/50 bg-orange-950/20 text-orange-200", priority: 80 });
+    } else if (agent.planMode === "deviating") {
+      situations.push({ key: `${agent.id}-deviating`, title: `${shortName} went off-plan`, detail: agent.planDeviationReason || agent.innerThought || "changing course", tone: "border-amber-800/50 bg-amber-950/20 text-amber-200", priority: 70 });
+    }
+  }
+
+  const conversationStarts = feed
+    .filter((entry: any) => entry.type === "system_event" && entry.text.includes("Conversation:"))
+    .slice(0, 4)
+    .map((entry: any) => ({
+      key: `feed-${entry.id}`,
+      title: "Conversation started",
+      detail: entry.text.replace("[EVENT] ", ""),
+      tone: "border-sky-800/50 bg-sky-950/20 text-sky-200",
+      priority: 85,
+    }));
+
+  return [...situations, ...conversationStarts].sort((a, b) => b.priority - a.priority).slice(0, 8);
+}
+
+function collapseFeed(entries: any[]) {
+  const collapsed: any[] = [];
+  let i = 0;
+  while (i < entries.length) {
+    const entry = entries[i];
+    if (entry.type === "agent_speak") {
+      const group = [entry];
+      let j = i + 1;
+      while (j < entries.length && entries[j].type === "agent_speak" && Math.abs(entries[j].tick - entry.tick) <= 8) {
+        group.push(entries[j]);
+        j += 1;
+      }
+      const names = [...new Set(group.map((g: any) => (g.agentName || "Someone").split(" ")[0]))];
+      collapsed.push({
+        id: `conversation-${entry.id}`,
+        type: "conversation_summary",
+        tick: entry.tick,
+        time: entry.time,
+        title: `${names.join(" & ")} talked`,
+        text: `${group.length} lines exchanged`,
+        lines: group,
+      });
+      i = j;
+      continue;
+    }
+    collapsed.push({ ...entry, title: entry.text, lines: null });
+    i += 1;
+  }
+  return collapsed;
+}
+
 export default function Dashboard({ onSend, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("overview");
   const [feedFilter, setFeedFilter] = useState<FeedFilter>("All");
@@ -31,24 +106,37 @@ export default function Dashboard({ onSend, onClose }: Props) {
   const [agentFilter, setAgentFilter] = useState("");
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
   const [agentSort, setAgentSort] = useState<AgentSort>("name");
+  const [rawLogOpen, setRawLogOpen] = useState(false);
+  const [rawLogFrozen, setRawLogFrozen] = useState(false);
+  const [rawLogSnapshot, setRawLogSnapshot] = useState<any[]>([]);
+  const [newRawCount, setNewRawCount] = useState(0);
+  const rawLogRef = useRef<HTMLDivElement | null>(null);
 
   const dashboardData = useSimulationStore((s) => s.dashboardData);
   const feed = useSimulationStore((s) => s.feed);
   const time = useSimulationStore((s) => s.time);
-  const tick = useSimulationStore((s) => s.tick);
   const agents = useSimulationStore((s) => s.agents);
+  const storyHighlights = useSimulationStore((s) => s.storyHighlights);
 
   useEffect(() => {
     onSend({ type: "request_dashboard" });
     const interval = setInterval(() => onSend({ type: "request_dashboard" }), 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [onSend]);
 
   const agentDetails = dashboardData?.agents || [];
   const economy = dashboardData?.economy || {};
   const townStats = dashboardData?.townStats || {};
-  const activeEvents = dashboardData?.activeEvents || [];
-  const eventLog = dashboardData?.eventLog || [];
+  const debugEvents = dashboardData?.debugEvents || [];
+  const quietFeed = useMemo(
+    () => feed.filter((entry) => entry.type !== "agent_move" && !(entry.type === "agent_action" && entry.text.includes("is working at"))),
+    [feed]
+  );
+  const collapsedFeed = useMemo(() => collapseFeed(quietFeed), [quietFeed]);
+  const currentSituations = useMemo(
+    () => buildCurrentSituations(agentDetails.length > 0 ? agentDetails : Object.values(agents), quietFeed),
+    [agentDetails, agents, quietFeed]
+  );
 
   const filteredFeed = feed.filter((entry) => {
     if (feedFilter !== "All") {
@@ -66,9 +154,37 @@ export default function Dashboard({ onSend, onClose }: Props) {
     feedCounts[cat] = (feedCounts[cat] || 0) + 1;
   }
 
+  useEffect(() => {
+    if (!rawLogOpen || !rawLogFrozen) {
+      setRawLogSnapshot(feed);
+      setNewRawCount(0);
+      return;
+    }
+    setNewRawCount(Math.max(0, feed.length - rawLogSnapshot.length));
+  }, [feed, rawLogOpen, rawLogFrozen, rawLogSnapshot.length]);
+
+  const handleRawScroll = () => {
+    const el = rawLogRef.current;
+    if (!el) return;
+    const shouldFreeze = el.scrollTop > 24;
+    if (!shouldFreeze && rawLogFrozen) {
+      setRawLogFrozen(false);
+      setRawLogSnapshot(feed);
+      setNewRawCount(0);
+      return;
+    }
+    if (shouldFreeze !== rawLogFrozen) setRawLogFrozen(shouldFreeze);
+  };
+
+  const unfreezeRawLog = () => {
+    setRawLogFrozen(false);
+    setRawLogSnapshot(feed);
+    setNewRawCount(0);
+    if (rawLogRef.current) rawLogRef.current.scrollTop = 0;
+  };
+
   return (
     <div className="fixed inset-0 bg-gray-950 z-50 flex flex-col" onClick={(e) => e.stopPropagation()}>
-      {/* Header */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
         <div className="flex items-center gap-4">
           <h1 className="text-lg font-bold text-amber-400">Polis Dashboard</h1>
@@ -79,9 +195,9 @@ export default function Dashboard({ onSend, onClose }: Props) {
           )}
         </div>
         <div className="flex items-center gap-3">
-          {activeEvents.length > 0 && (
+          {debugEvents.length > 0 && (
             <span className="text-xs text-red-400 bg-red-900/30 px-2 py-0.5 rounded">
-              {activeEvents.length} active event{activeEvents.length > 1 ? "s" : ""}
+              {debugEvents.length} debug event{debugEvents.length > 1 ? "s" : ""}
             </span>
           )}
           <button onClick={onClose} className="text-gray-400 hover:text-white text-sm px-3 py-1 rounded hover:bg-gray-800">
@@ -90,7 +206,6 @@ export default function Dashboard({ onSend, onClose }: Props) {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-gray-800 bg-gray-900/50 px-6 shrink-0">
         {TABS.map((t) => (
           <button
@@ -105,37 +220,60 @@ export default function Dashboard({ onSend, onClose }: Props) {
         ))}
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-y-auto p-6">
-        {tab === "overview" && <OverviewTab stats={townStats} economy={economy} activeEvents={activeEvents} eventLog={eventLog} time={time} worldSummary={dashboardData?.worldSummary || ""} />}
+        {tab === "overview" && (
+          <OverviewTab
+            stats={townStats}
+            economy={economy}
+            debugEvents={debugEvents}
+            time={time}
+            worldSummary={dashboardData?.worldSummary || ""}
+            storyHighlights={dashboardData?.storyHighlights || storyHighlights}
+            currentSituations={currentSituations}
+            collapsedFeed={collapsedFeed}
+            activeProposals={dashboardData?.activeProposals || []}
+            meetings={dashboardData?.meetings || []}
+            projects={dashboardData?.projects || []}
+            trades={dashboardData?.trades || []}
+            rawLogOpen={rawLogOpen}
+            onToggleRawLog={() => setRawLogOpen((v) => !v)}
+          />
+        )}
         {tab === "agents" && (
           <AgentsTab agents={agentDetails.length > 0 ? agentDetails : Object.values(agents)} expanded={expandedAgent} onToggle={(id) => setExpandedAgent(expandedAgent === id ? null : id)} sort={agentSort} onSort={setAgentSort} />
         )}
-        {tab === "economy" && <EconomyTab economy={economy} agents={agentDetails.length > 0 ? agentDetails : Object.values(agents)} />}
         {tab === "timeline" && (
           <TimelineTab feed={filteredFeed} filter={feedFilter} search={search} agentFilter={agentFilter} agents={Object.values(agents)} feedCounts={feedCounts} onFilter={setFeedFilter} onSearch={setSearch} onAgentFilter={setAgentFilter} dayRecaps={dashboardData?.dayRecaps || []} />
         )}
         {tab === "social" && <SocialTab agents={agentDetails.length > 0 ? agentDetails : []} />}
         {tab === "constitution" && <ConstitutionTab constitution={dashboardData?.constitution || {}} />}
         {tab === "resources" && <ResourcesTab resources={dashboardData?.resources || {}} />}
-        {tab === "bulletin" && <BulletinTab posts={dashboardData?.bulletinBoard || []} />}
       </div>
+
+      {rawLogOpen && (
+        <RawLogDrawer
+          feed={rawLogFrozen ? rawLogSnapshot : feed}
+          frozen={rawLogFrozen}
+          newCount={newRawCount}
+          rawLogRef={rawLogRef}
+          onScroll={handleRawScroll}
+          onResume={unfreezeRawLog}
+          onClose={() => setRawLogOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-/* ==================== OVERVIEW TAB ==================== */
-function OverviewTab({ stats, economy, activeEvents, eventLog, time, worldSummary }: any) {
+function OverviewTab({ stats, debugEvents, time, worldSummary, storyHighlights = [], currentSituations = [], collapsedFeed = [], activeProposals = [], meetings = [], projects = [], trades = [], rawLogOpen, onToggleRawLog }: any) {
   return (
     <div className="space-y-6">
-      {/* World Summary */}
       {worldSummary && (
         <div className="p-3 bg-gray-900 rounded-lg border border-gray-800 text-sm text-gray-300">
           {worldSummary}
         </div>
       )}
 
-      {/* Stat cards */}
       <div className="grid grid-cols-4 gap-3">
         <StatCard label="Population" value={stats.population || 15} />
         <StatCard label="Day" value={time?.day || 1} />
@@ -147,50 +285,200 @@ function OverviewTab({ stats, economy, activeEvents, eventLog, time, worldSummar
         <StatCard label="Total Memories" value={stats.totalMemories || 0} />
         <StatCard label="Skills Found" value={stats.totalSkillsDiscovered || 0} />
         <StatCard label="Places Found" value={stats.totalLocationsDiscovered || 0} />
+        <StatCard label="Proposals" value={activeProposals.length || 0} />
+        <StatCard label="Projects" value={projects.length || 0} />
       </div>
 
-      {/* Notable agents */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-3">Notable Agents</h3>
-          <div className="space-y-2 text-xs">
-            {stats.richest && <NotableLine emoji={"$"} label="Richest" name={stats.richest.name} detail={`${stats.richest.wealth}c`} />}
-            {stats.poorest && <NotableLine emoji={"!"} label="Poorest" name={stats.poorest.name} detail={`${stats.poorest.wealth}c`} />}
-            {stats.happiest && <NotableLine emoji={"+"} label="Happiest" name={stats.happiest.name} detail={`${Math.round(stats.happiest.mood * 100)}%`} />}
-            {stats.saddest && <NotableLine emoji={"-"} label="Saddest" name={stats.saddest.name} detail={`${Math.round(stats.saddest.mood * 100)}%`} />}
-            {stats.mostConnected && <NotableLine emoji={"*"} label="Most Connected" name={stats.mostConnected.name} detail={`${stats.mostConnected.connections} relationships`} />}
+      <div className="grid grid-cols-12 gap-4">
+        <div className="col-span-3 bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs text-gray-500 uppercase">Story Highlights</h3>
+            <button onClick={onToggleRawLog} className="text-[10px] text-amber-400 hover:text-amber-300">
+              {rawLogOpen ? "Hide raw log" : "Open raw log"}
+            </button>
+          </div>
+          <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+            {storyHighlights.length === 0 ? (
+              <p className="text-xs text-gray-600 italic">No story beats yet</p>
+            ) : (
+              [...storyHighlights].slice(-10).reverse().map((h: any, i: number) => {
+                const formatted = formatStoryHighlight(h);
+                return (
+                  <div key={i} className="rounded border border-gray-800 bg-gray-950/50 p-2">
+                    <div className="text-xs text-amber-200 font-medium">{formatted.title}</div>
+                    <div className="text-[11px] text-gray-400">{formatted.detail}</div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
 
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-3">
-            God Mode Events ({stats.totalGodEvents || 0})
-          </h3>
-          {eventLog.length === 0 ? (
-            <p className="text-xs text-gray-600 italic">No events injected yet</p>
-          ) : (
-            <div className="space-y-1 max-h-40 overflow-y-auto">
-              {[...eventLog].reverse().map((e: any, i: number) => (
-                <div key={i} className="text-xs text-gray-400">
-                  <span className="text-red-400">[Tick {e.tick}]</span> {e.type.replace(/_/g, " ")}
+        <div className="col-span-6 bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <h3 className="text-xs text-gray-500 uppercase mb-3">Current Situations</h3>
+          <div className="grid grid-cols-2 gap-3">
+            {currentSituations.length === 0 ? (
+              <p className="text-xs text-gray-600 italic">The settlement is quiet right now.</p>
+            ) : (
+              currentSituations.map((s: any) => (
+                <div key={s.key} className={`rounded-lg border p-3 ${s.tone}`}>
+                  <div className="text-xs font-semibold">{s.title}</div>
+                  <div className="text-[11px] opacity-90">{s.detail}</div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="mt-5">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[10px] text-gray-500 uppercase">Now</h4>
+              <button onClick={onToggleRawLog} className="text-[10px] text-gray-400 hover:text-gray-200">
+                Open raw event log
+              </button>
+            </div>
+            <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+              {collapsedFeed.length === 0 ? (
+                <p className="text-xs text-gray-600 italic">Nothing notable yet.</p>
+              ) : (
+                collapsedFeed.slice(0, 10).map((entry: any) => (
+                  <div key={entry.id} className="rounded border border-gray-800 bg-gray-950/40 px-3 py-2">
+                    <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                      <span>{entry.time}</span>
+                      {entry.type === "conversation_summary" && <span className="text-blue-300">Conversation</span>}
+                    </div>
+                    <div className="text-xs text-gray-200">{entry.title || entry.text}</div>
+                    <div className="text-[11px] text-gray-500">{entry.text}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="mt-5 grid grid-cols-3 gap-3">
+            <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+              <div className="text-[10px] text-gray-500 uppercase mb-2">Active Proposals</div>
+              {activeProposals.length === 0 ? <div className="text-[11px] text-gray-600 italic">No active proposals</div> : activeProposals.slice(0, 4).map((proposal: any) => (
+                <div key={proposal.id} className="mb-2 text-[11px]">
+                  <div className="text-amber-300">{proposal.description}</div>
+                  <div className="text-gray-500">{proposal.status} | legitimacy {proposal.legitimacy}</div>
                 </div>
               ))}
             </div>
-          )}
+            <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+              <div className="text-[10px] text-gray-500 uppercase mb-2">Meetings</div>
+              {meetings.length === 0 ? <div className="text-[11px] text-gray-600 italic">No meetings queued</div> : meetings.slice(0, 4).map((meeting: any) => (
+                <div key={meeting.id} className="mb-2 text-[11px]">
+                  <div className="text-cyan-300">{meeting.topic}</div>
+                  <div className="text-gray-500">{meeting.status} at {meeting.location?.replace(/_/g, " ")}</div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+              <div className="text-[10px] text-gray-500 uppercase mb-2">Projects</div>
+              {projects.length === 0 ? <div className="text-[11px] text-gray-600 italic">No projects underway</div> : projects.slice(0, 4).map((project: any) => (
+                <div key={project.id} className="mb-2 text-[11px]">
+                  <div className="text-green-300">{project.name}</div>
+                  <div className="text-gray-500">{project.status} | {Math.round((project.progress || 0) * 100)}%</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="col-span-3 space-y-3">
+          <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+            <h3 className="text-xs text-gray-500 uppercase mb-3">Notable Agents</h3>
+            <div className="space-y-2 text-xs">
+              {stats.richest && <NotableLine emoji={"$"} label="Richest" name={stats.richest.name} detail={`${stats.richest.wealth}c`} />}
+              {stats.poorest && <NotableLine emoji={"!"} label="Poorest" name={stats.poorest.name} detail={`${stats.poorest.wealth}c`} />}
+              {stats.happiest && <NotableLine emoji={"+"} label="Happiest" name={stats.happiest.name} detail={`${Math.round(stats.happiest.mood * 100)}%`} />}
+              {stats.saddest && <NotableLine emoji={"-"} label="Saddest" name={stats.saddest.name} detail={`${Math.round(stats.saddest.mood * 100)}%`} />}
+              {stats.mostConnected && <NotableLine emoji={"*"} label="Most Connected" name={stats.mostConnected.name} detail={`${stats.mostConnected.connections} relationships`} />}
+            </div>
+          </div>
+
+          <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+            <h3 className="text-xs text-gray-500 uppercase mb-3">Debug ({debugEvents.length || 0})</h3>
+            {debugEvents.length === 0 ? (
+              <p className="text-xs text-gray-600 italic">Debug is quiet.</p>
+            ) : (
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {[...debugEvents].reverse().slice(0, 8).map((e: any, i: number) => (
+                  <div key={i} className="text-xs text-gray-400">
+                    <span className="text-red-400">[Tick {e.tick}]</span> {e.description || e.type.replace(/_/g, " ")}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+            <h3 className="text-xs text-gray-500 uppercase mb-3">Recent Barter ({trades.length || 0})</h3>
+            {trades.length === 0 ? (
+              <p className="text-xs text-gray-600 italic">No trades yet.</p>
+            ) : (
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {[...trades].reverse().slice(0, 6).map((trade: any, i: number) => (
+                  <div key={i} className="text-xs text-gray-400">
+                    <span className="text-amber-400">{trade.from_agent}</span> traded with <span className="text-cyan-300">{trade.to_agent}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Active events */}
-      {activeEvents.length > 0 && (
-        <div className="bg-red-950/30 rounded-lg border border-red-900/50 p-4">
-          <h3 className="text-xs text-red-400 uppercase mb-2">Active Events</h3>
-          {activeEvents.map((e: any, i: number) => (
-            <div key={i} className="text-xs text-gray-300">
-              {e.type.replace(/_/g, " ")} — {e.remaining_ticks} ticks remaining
-            </div>
-          ))}
+function RawLogDrawer({ feed, frozen, newCount, rawLogRef, onScroll, onResume, onClose }: any) {
+  const [expandedConversations, setExpandedConversations] = useState<Record<string, boolean>>({});
+  const collapsed = useMemo(() => collapseFeed(feed), [feed]);
+
+  return (
+    <div className="absolute right-0 bottom-0 top-24 w-[420px] border-l border-gray-800 bg-gray-950/96 backdrop-blur-sm z-50 flex flex-col">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+        <div>
+          <div className="text-xs text-gray-400 uppercase">Raw Event Log</div>
+          <div className="text-[11px] text-gray-600">{frozen ? "Frozen while you scroll" : "Live"}</div>
         </div>
-      )}
+        <div className="flex items-center gap-2">
+          {newCount > 0 && (
+            <button onClick={onResume} className="px-2 py-1 rounded bg-amber-700 text-white text-[11px]">
+              {newCount} new events
+            </button>
+          )}
+          <button onClick={onClose} className="text-xs text-gray-400 hover:text-white">Close</button>
+        </div>
+      </div>
+      <div ref={rawLogRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
+        {collapsed.map((entry: any) => (
+          <div key={entry.id} className="rounded border border-gray-800 bg-gray-900/60 p-2">
+            <div className="text-[10px] text-gray-600 mb-1">[{entry.time}]</div>
+            {entry.type === "conversation_summary" ? (
+              <>
+                <button
+                  onClick={() => setExpandedConversations((prev) => ({ ...prev, [entry.id]: !prev[entry.id] }))}
+                  className="w-full text-left"
+                >
+                  <div className="text-xs text-blue-300">{entry.title}</div>
+                  <div className="text-[11px] text-gray-500">{entry.text}</div>
+                </button>
+                {expandedConversations[entry.id] && (
+                  <div className="mt-2 space-y-1 border-t border-gray-800 pt-2">
+                    {entry.lines.map((line: any) => (
+                      <div key={line.id} className="text-[11px] text-gray-300">{line.text}</div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-xs text-gray-300">{entry.text}</div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -215,7 +503,6 @@ function NotableLine({ emoji, label, name, detail }: { emoji: string; label: str
   );
 }
 
-/* ==================== AGENTS TAB ==================== */
 function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]; expanded: string | null; onToggle: (id: string) => void; sort: AgentSort; onSort: (s: AgentSort) => void }) {
   const sorted = [...agents].sort((a, b) => {
     if (sort === "wealth") return (b.state?.wealth || 0) - (a.state?.wealth || 0);
@@ -263,14 +550,12 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
                   </div>
                 </div>
 
-                {/* Bars */}
                 <div className="space-y-1">
                   <MiniBar label="Mood" value={mood} color={mood > 60 ? "bg-green-500" : mood > 30 ? "bg-yellow-500" : "bg-red-500"} />
                   <MiniBar label="Energy" value={energy} color="bg-blue-500" />
                   <MiniBar label="Hunger" value={hunger} color="bg-orange-500" />
                 </div>
 
-                {/* Stats row */}
                 <div className="flex gap-3 mt-2 text-[9px] text-gray-500">
                   <span>{memCount} memories</span>
                   <span>{relCount} relationships</span>
@@ -278,106 +563,43 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
                   <span className="ml-auto text-gray-600">{a.emotion}</span>
                 </div>
 
-                {a.innerThought && (
-                  <div className="mt-1 text-[10px] text-gray-500 italic truncate">"{a.innerThought}"</div>
-                )}
+                {a.innerThought && <div className="mt-1 text-[10px] text-gray-500 italic truncate">"{a.innerThought}"</div>}
               </div>
 
-              {/* Expanded */}
               {isExp && (
                 <div className="border-t border-gray-800 p-3 space-y-3">
-                  {/* Personality */}
-                  {a.personality && (
-                    <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-1">Personality</div>
-                      <div className="grid grid-cols-5 gap-2">
-                        {Object.entries(a.personality).map(([trait, val]: [string, any]) => (
-                          <div key={trait}>
-                            <div className="text-[9px] text-gray-500 capitalize truncate">{trait.slice(0, 4)}</div>
-                            <div className="bg-gray-800 rounded-full h-1.5 mt-0.5">
-                              <div className="bg-purple-500 h-1.5 rounded-full" style={{ width: `${val * 100}%` }} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                  {a.dailyPlan && <div className="text-[10px] text-gray-400"><span className="text-gray-600 uppercase">Plan: </span>{a.dailyPlan}</div>}
+                  {(a.planMode || a.currentPlanStep) && (
+                    <div className="text-[10px] text-gray-400">
+                      <span className="text-gray-600 uppercase">Plan Mode: </span>
+                      {(a.planMode || "improvising").replace(/_/g, " ")}
+                      {a.planDeviationReason ? ` (${a.planDeviationReason})` : ""}
                     </div>
                   )}
-
-                  {a.dailyPlan && <div className="text-[10px] text-gray-400"><span className="text-gray-600 uppercase">Plan: </span>{a.dailyPlan}</div>}
-
+                  {a.currentPlanStep && <div className="p-2 bg-amber-900/10 border border-amber-900/30 rounded text-[10px] text-amber-100">{a.currentPlanStep.label || `${String(a.currentPlanStep.hour).padStart(2, "0")}:00 ${a.currentPlanStep.activity}`}</div>}
                   {a.goals && (
                     <div>
                       <div className="text-[10px] text-gray-600 uppercase mb-0.5">Goals</div>
                       {a.goals.map((g: string, i: number) => <div key={i} className="text-[10px] text-gray-400">- {g}</div>)}
                     </div>
                   )}
-
-                  {a.fears && (
-                    <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-0.5">Fears</div>
-                      {a.fears.map((f: string, i: number) => <div key={i} className="text-[10px] text-red-400/70">- {f}</div>)}
-                    </div>
-                  )}
-
-                  {a.backstory && <div className="text-[10px] text-gray-500">{a.backstory}</div>}
-
-                  {/* Memories */}
-                  <div>
-                    <div className="text-[10px] text-gray-600 uppercase mb-1">All Memories ({memCount})</div>
-                    <div className="space-y-0.5 max-h-60 overflow-y-auto">
-                      {[...(a.memories || [])].reverse().map((m: any, i: number) => (
-                        <div key={i} className="text-[10px] text-gray-400">
-                          <span className={`${m.type === "conversation" ? "text-green-500" : m.type === "reflection" ? "text-purple-500" : m.type === "emotion" ? "text-red-500" : "text-blue-500"}`}>
-                            [{m.type}]
-                          </span> {m.content}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Relationships */}
-                  {a.relationships && Object.keys(a.relationships).length > 0 && (
-                    <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-1">Relationships ({relCount})</div>
-                      <table className="w-full text-[10px]">
-                        <thead><tr className="text-gray-600"><th className="text-left py-0.5">Name</th><th className="text-right">Sentiment</th><th className="text-right">Trust</th><th className="text-right">Familiarity</th></tr></thead>
-                        <tbody>
-                          {Object.entries(a.relationships).map(([name, rel]: [string, any]) => (
-                            <tr key={name} className="text-gray-400">
-                              <td className="py-0.5">{name}</td>
-                              <td className={`text-right ${rel.sentiment > 0.6 ? "text-green-400" : rel.sentiment < 0.3 ? "text-red-400" : ""}`}>{rel.sentiment?.toFixed(2)}</td>
-                              <td className={`text-right ${rel.trust > 0.6 ? "text-blue-400" : rel.trust < 0.3 ? "text-red-400" : ""}`}>{rel.trust?.toFixed(2)}</td>
-                              <td className="text-right">{rel.familiarity?.toFixed(2) || "-"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {/* Social Commitments */}
                   {a.socialCommitments && a.socialCommitments.length > 0 && (
                     <div>
                       <div className="text-[10px] text-gray-600 uppercase mb-1">Plans ({a.socialCommitments.length})</div>
                       <div className="space-y-0.5">
                         {a.socialCommitments.map((c: any, i: number) => (
-                          <div key={i} className="text-[10px] text-cyan-400">
-                            {c.what} — {c.where?.replace(/_/g, " ")}{c.with?.length > 0 ? ` with ${c.with.join(", ")}` : ""}
-                            {c.recurring && <span className="text-amber-500 ml-1">(recurring)</span>}
-                          </div>
+                          <div key={i} className="text-[10px] text-cyan-400">{c.description || c.what} — {(c.location || c.where || "").replace(/_/g, " ")}{c.with?.length > 0 ? ` with ${c.with.join(", ")}` : ""}</div>
                         ))}
                       </div>
                     </div>
                   )}
-
-                  {/* Transactions */}
-                  {txnCount > 0 && (
+                  {a.schedule && a.schedule.length > 0 && (
                     <div>
-                      <div className="text-[10px] text-gray-600 uppercase mb-1">Transactions ({txnCount})</div>
-                      <div className="space-y-0.5 max-h-32 overflow-y-auto">
-                        {[...(a.transactions || [])].reverse().slice(0, 20).map((t: any, i: number) => (
-                          <div key={i} className={`text-[10px] ${t.action === "buy" ? "text-red-400" : "text-green-400"}`}>
-                            {t.action === "buy" ? "Bought" : "Sold"} {t.item} for {t.price}c
+                      <div className="text-[10px] text-gray-600 uppercase mb-1">Daily Schedule ({a.schedule.length})</div>
+                      <div className="space-y-1">
+                        {a.schedule.map((step: any, i: number) => (
+                          <div key={i} className={`text-[10px] p-1.5 rounded border ${a.currentPlanStep?.hour === step.hour && a.currentPlanStep?.activity === step.activity ? "bg-amber-900/15 border-amber-700/40 text-amber-100" : "bg-gray-800/20 border-gray-800 text-gray-400"}`}>
+                            {step.label || `${String(step.hour).padStart(2, "0")}:00 ${step.activity}`}
                           </div>
                         ))}
                       </div>
@@ -405,122 +627,6 @@ function MiniBar({ label, value, color }: { label: string; value: number; color:
   );
 }
 
-/* ==================== ECONOMY TAB ==================== */
-function EconomyTab({ economy, agents }: { economy: any; agents: any[] }) {
-  const prices = economy.prices || {};
-  const basePrices = economy.basePrices || {};
-  const supply = economy.supply || {};
-  const demand = economy.demand || {};
-  const priceHistory = economy.priceHistory || {};
-
-  const wealthRanking = [...agents].sort((a, b) => (b.state?.wealth || 0) - (a.state?.wealth || 0));
-
-  return (
-    <div className="space-y-6">
-      {/* Top stats */}
-      <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Treasury" value={`${Math.round(economy.treasury || 0)}c`} color="text-blue-400" />
-        <StatCard label="Total Transactions" value={economy.totalTransactions || 0} />
-        <StatCard label="Items Tracked" value={Object.keys(prices).length} />
-      </div>
-
-      <div className="grid grid-cols-2 gap-6">
-        {/* Prices with base comparison */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-3">Prices vs Base</h3>
-          <table className="w-full text-xs">
-            <thead><tr className="text-gray-600"><th className="text-left py-1">Item</th><th className="text-right">Base</th><th className="text-right">Current</th><th className="text-right">Change</th><th className="text-right">Trend</th></tr></thead>
-            <tbody>
-              {Object.entries(prices).map(([item, price]: [string, any]) => {
-                const base = basePrices[item] || price;
-                const pct = Math.round(((price - base) / base) * 100);
-                const history = priceHistory[item] || [];
-                return (
-                  <tr key={item} className="text-gray-300">
-                    <td className="py-1 capitalize">{item}</td>
-                    <td className="text-right text-gray-500">{base}c</td>
-                    <td className="text-right text-amber-400">{price}c</td>
-                    <td className={`text-right ${pct > 10 ? "text-red-400" : pct < -10 ? "text-green-400" : "text-gray-500"}`}>
-                      {pct > 0 ? "+" : ""}{pct}%
-                    </td>
-                    <td className="text-right">
-                      <MiniSparkline values={history} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Supply & Demand */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-3">Supply & Demand</h3>
-          <div className="space-y-3">
-            {Object.entries(supply).map(([item, amount]: [string, any]) => {
-              const dem = demand[item] || 0;
-              return (
-                <div key={item}>
-                  <div className="flex justify-between text-xs mb-0.5">
-                    <span className="text-gray-300 capitalize">{item}</span>
-                    <span className="text-gray-500">S:{Math.round(amount)} D:{Math.round(dem)}</span>
-                  </div>
-                  <div className="flex gap-1">
-                    <div className="flex-1 bg-gray-800 rounded-full h-2 relative">
-                      <div className={`h-2 rounded-full ${amount > 15 ? "bg-green-600" : amount > 5 ? "bg-yellow-600" : "bg-red-600"}`} style={{ width: `${Math.min(100, (amount / 30) * 100)}%` }} />
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Wealth Leaderboard */}
-      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-        <h3 className="text-xs text-gray-500 uppercase mb-3">Wealth Leaderboard</h3>
-        <div className="grid grid-cols-3 gap-2">
-          {wealthRanking.map((a: any, i: number) => {
-            const color = AGENT_COLORS[(a.colorIndex || 0) % AGENT_COLORS.length];
-            const maxWealth = wealthRanking[0]?.state?.wealth || 1;
-            const pct = Math.round(((a.state?.wealth || 0) / maxWealth) * 100);
-            return (
-              <div key={a.id} className="flex items-center gap-2 text-xs">
-                <span className="text-gray-600 w-4">{i + 1}.</span>
-                <div className="w-4 h-4 rounded-full" style={{ backgroundColor: `#${color.toString(16).padStart(6, "0")}` }} />
-                <span className="text-gray-300 flex-1 truncate">{a.name?.split(" ")[0]}</span>
-                <div className="w-20 bg-gray-800 rounded-full h-1.5">
-                  <div className="bg-amber-500 h-1.5 rounded-full" style={{ width: `${pct}%` }} />
-                </div>
-                <span className="text-amber-400 w-10 text-right">{a.state?.wealth || 0}c</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MiniSparkline({ values }: { values: number[] }) {
-  if (values.length < 2) return <span className="text-gray-600">-</span>;
-  const last10 = values.slice(-10);
-  const min = Math.min(...last10);
-  const max = Math.max(...last10);
-  const range = max - min || 1;
-  const w = 40;
-  const h = 12;
-  const points = last10.map((v, i) => `${(i / (last10.length - 1)) * w},${h - ((v - min) / range) * h}`).join(" ");
-  const trend = last10[last10.length - 1] > last10[0];
-  return (
-    <svg width={w} height={h} className="inline-block">
-      <polyline points={points} fill="none" stroke={trend ? "#22c55e" : "#ef4444"} strokeWidth="1.5" />
-    </svg>
-  );
-}
-
-/* ==================== TIMELINE TAB ==================== */
 function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, onFilter, onSearch, onAgentFilter, dayRecaps = [] }: any) {
   const TYPE_COLORS: Record<string, string> = {
     agent_speak: "text-blue-400", agent_thought: "text-purple-400", transaction: "text-amber-400",
@@ -529,7 +635,6 @@ function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, on
 
   return (
     <div className="space-y-3">
-      {/* Day Recaps */}
       {dayRecaps.length > 0 && (
         <div className="space-y-1 mb-3">
           <div className="text-[10px] text-gray-500 uppercase">Daily Recaps</div>
@@ -572,7 +677,6 @@ function TimelineTab({ feed, filter, search, agentFilter, agents, feedCounts, on
   );
 }
 
-/* ==================== SOCIAL TAB ==================== */
 function SocialTab({ agents }: { agents: any[] }) {
   const [sortBy, setSortBy] = useState<"sentiment" | "trust" | "familiarity">("sentiment");
   const pairs: Array<{ a: string; b: string; sentiment: number; trust: number; familiarity: number; notes: string }> = [];
@@ -589,56 +693,28 @@ function SocialTab({ agents }: { agents: any[] }) {
   }
 
   pairs.sort((a, b) => (b[sortBy] as number) - (a[sortBy] as number));
-
   const best = pairs[0];
   const worst = pairs[pairs.length - 1];
 
   return (
     <div className="space-y-4 max-w-4xl">
-      {/* Highlights */}
       {pairs.length >= 2 && (
         <div className="grid grid-cols-2 gap-3">
-          {best && (
-            <div className="bg-green-950/30 rounded-lg border border-green-900/50 p-3">
-              <div className="text-[10px] text-green-400 uppercase mb-1">Strongest Bond</div>
-              <div className="text-xs text-gray-300">{best.a.split(" ")[0]} & {best.b.split(" ")[0]}</div>
-              <div className="text-[10px] text-gray-500">Sentiment: {best.sentiment.toFixed(2)} | Trust: {best.trust.toFixed(2)}</div>
-            </div>
-          )}
-          {worst && (
-            <div className="bg-red-950/30 rounded-lg border border-red-900/50 p-3">
-              <div className="text-[10px] text-red-400 uppercase mb-1">Weakest Bond</div>
-              <div className="text-xs text-gray-300">{worst.a.split(" ")[0]} & {worst.b.split(" ")[0]}</div>
-              <div className="text-[10px] text-gray-500">Sentiment: {worst.sentiment.toFixed(2)} | Trust: {worst.trust.toFixed(2)}</div>
-            </div>
-          )}
+          {best && <div className="bg-green-950/30 rounded-lg border border-green-900/50 p-3"><div className="text-[10px] text-green-400 uppercase mb-1">Strongest Bond</div><div className="text-xs text-gray-300">{best.a.split(" ")[0]} & {best.b.split(" ")[0]}</div><div className="text-[10px] text-gray-500">Sentiment: {best.sentiment.toFixed(2)} | Trust: {best.trust.toFixed(2)}</div></div>}
+          {worst && <div className="bg-red-950/30 rounded-lg border border-red-900/50 p-3"><div className="text-[10px] text-red-400 uppercase mb-1">Weakest Bond</div><div className="text-xs text-gray-300">{worst.a.split(" ")[0]} & {worst.b.split(" ")[0]}</div><div className="text-[10px] text-gray-500">Sentiment: {worst.sentiment.toFixed(2)} | Trust: {worst.trust.toFixed(2)}</div></div>}
         </div>
       )}
 
       <div className="flex items-center gap-2">
         <span className="text-xs text-gray-500">{pairs.length} relationships | Sort by:</span>
         {(["sentiment", "trust", "familiarity"] as const).map((s) => (
-          <button key={s} onClick={() => setSortBy(s)} className={`px-2 py-0.5 text-xs rounded ${sortBy === s ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-400 hover:bg-gray-700"}`}>
-            {s}
-          </button>
+          <button key={s} onClick={() => setSortBy(s)} className={`px-2 py-0.5 text-xs rounded ${sortBy === s ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-400 hover:bg-gray-700"}`}>{s}</button>
         ))}
       </div>
 
-      {pairs.length === 0 ? (
-        <p className="text-gray-600 italic">No relationships yet</p>
-      ) : (
+      {pairs.length === 0 ? <p className="text-gray-600 italic">No relationships yet</p> : (
         <table className="w-full text-xs">
-          <thead>
-            <tr className="text-gray-500 text-left">
-              <th className="py-1">Agent</th>
-              <th className="py-1">With</th>
-              <th className="py-1">Sentiment</th>
-              <th className="py-1 w-12 text-right">Val</th>
-              <th className="py-1 w-12 text-right">Trust</th>
-              <th className="py-1 w-12 text-right">Fam</th>
-              <th className="py-1">Notes</th>
-            </tr>
-          </thead>
+          <thead><tr className="text-gray-500 text-left"><th className="py-1">Agent</th><th className="py-1">With</th><th className="py-1">Sentiment</th><th className="py-1 w-12 text-right">Val</th><th className="py-1 w-12 text-right">Trust</th><th className="py-1 w-12 text-right">Fam</th><th className="py-1">Notes</th></tr></thead>
           <tbody>
             {pairs.map((p, i) => {
               const sentPct = Math.round(((p.sentiment + 1) / 2) * 100);
@@ -647,11 +723,7 @@ function SocialTab({ agents }: { agents: any[] }) {
                 <tr key={i} className="hover:bg-gray-900/50 border-t border-gray-800/50">
                   <td className="py-1.5 text-gray-300">{p.a.split(" ")[0]}</td>
                   <td className="py-1.5 text-gray-300">{p.b.split(" ")[0]}</td>
-                  <td className="py-1.5 pr-2">
-                    <div className="w-full bg-gray-800 rounded-full h-2 max-w-[120px]">
-                      <div className={`h-2 rounded-full ${sentColor}`} style={{ width: `${sentPct}%` }} />
-                    </div>
-                  </td>
+                  <td className="py-1.5 pr-2"><div className="w-full bg-gray-800 rounded-full h-2 max-w-[120px]"><div className={`h-2 rounded-full ${sentColor}`} style={{ width: `${sentPct}%` }} /></div></td>
                   <td className={`py-1.5 text-right ${p.sentiment > 0.6 ? "text-green-400" : p.sentiment < 0.3 ? "text-red-400" : "text-gray-400"}`}>{p.sentiment.toFixed(2)}</td>
                   <td className={`py-1.5 text-right ${p.trust > 0.6 ? "text-blue-400" : p.trust < 0.3 ? "text-red-400" : "text-gray-500"}`}>{p.trust.toFixed(2)}</td>
                   <td className="py-1.5 text-right text-gray-500">{p.familiarity.toFixed(2)}</td>
@@ -666,7 +738,6 @@ function SocialTab({ agents }: { agents: any[] }) {
   );
 }
 
-/* ==================== CONSTITUTION TAB ==================== */
 function ConstitutionTab({ constitution }: { constitution: any }) {
   const economic = constitution.economic || {};
   const governance = constitution.governance || {};
@@ -676,150 +747,90 @@ function ConstitutionTab({ constitution }: { constitution: any }) {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      {/* Status summary */}
       <div className="grid grid-cols-2 gap-4">
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <h3 className="text-xs text-gray-500 uppercase mb-2">Governance</h3>
-          <div className="text-sm text-gray-300">
-            {governance.system || "No system established"}
-          </div>
-          {governance.informal_leader && (
-            <div className="text-xs text-amber-400 mt-1">Informal leader: {governance.informal_leader}</div>
-          )}
-          {governance.leaders?.length > 0 && (
-            <div className="text-xs text-gray-400 mt-1">Leaders: {governance.leaders.join(", ")}</div>
-          )}
-          {governance.laws?.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] text-gray-600 uppercase">Laws</div>
-              {governance.laws.map((l: string, i: number) => (
-                <div key={i} className="text-xs text-gray-400">- {l}</div>
-              ))}
+          <div className="text-sm text-gray-300">{governance.system || "No system established"}</div>
+          {governance.informal_leader && <div className="text-xs text-amber-400 mt-1">Informal leader: {governance.informal_leader}</div>}
+          {governance.leaders?.length > 0 && <div className="text-xs text-gray-400 mt-1">Leaders: {governance.leaders.join(", ")}</div>}
+          {governance.leadership_scores && (
+            <div className="mt-1 text-[10px] text-gray-500">
+              Influence: {Object.entries(governance.leadership_scores).map(([name, score]) => `${name} (${score})`).join(", ")}
             </div>
           )}
+          {governance.laws?.length > 0 && <div className="mt-2"><div className="text-[10px] text-gray-600 uppercase">Laws</div>{governance.laws.map((l: string, i: number) => <div key={i} className="text-xs text-gray-400">- {l}</div>)}</div>}
         </div>
 
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <h3 className="text-xs text-gray-500 uppercase mb-2">Economy</h3>
-          <div className="text-sm text-gray-300">
-            Currency: {economic.currency || "None (barter only)"}
-          </div>
-          {economic.trade_rules?.length > 0 && (
-            <div className="mt-1 text-xs text-gray-400">
-              Trade rules: {economic.trade_rules.join("; ")}
-            </div>
-          )}
+          <div className="text-sm text-gray-300">Currency: {economic.currency || "None (barter only)"}</div>
+          {economic.trade_rules?.length > 0 && <div className="mt-1 text-xs text-gray-400">Trade rules: {economic.trade_rules.join("; ")}</div>}
         </div>
       </div>
 
-      {/* Social Norms */}
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
         <h3 className="text-xs text-gray-500 uppercase mb-2">Social Norms ({norms.length})</h3>
-        {norms.length === 0 ? (
-          <p className="text-xs text-gray-600 italic">No norms have emerged yet</p>
-        ) : (
-          <div className="space-y-1">
-            {norms.map((n: string, i: number) => (
-              <div key={i} className="text-xs text-gray-300">- {n}</div>
+        {norms.length === 0 ? <p className="text-xs text-gray-600 italic">No norms have emerged yet</p> : (
+          <div className="space-y-2">
+            {norms.map((n: any, i: number) => (
+              <div key={i} className="text-xs text-gray-300 border border-gray-800 rounded p-2">
+                <div>- {typeof n === "string" ? n : n.text}</div>
+                {typeof n !== "string" && (
+                  <div className="text-[10px] text-gray-500 mt-1">
+                    {n.category} | strength {n.strength} | violations {n.violations}
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* Institutions */}
       {institutions.length > 0 && (
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <h3 className="text-xs text-gray-500 uppercase mb-2">Institutions ({institutions.length})</h3>
           {institutions.map((inst: any, i: number) => (
-            <div key={i} className="text-xs text-gray-300 mb-1">
-              <span className="text-amber-400">{inst.name}</span>: {inst.purpose || "no stated purpose"}
+            <div key={i} className="text-xs text-gray-300 mb-2 border border-gray-800 rounded p-2">
+              <div><span className="text-amber-400">{inst.name}</span>: {inst.purpose || "no stated purpose"}</div>
+              {inst.members?.length > 0 && <div className="text-[10px] text-gray-500 mt-1">Members: {inst.members.join(", ")}</div>}
+              {inst.legitimacy !== undefined && <div className="text-[10px] text-gray-600">Legitimacy: {inst.legitimacy}</div>}
             </div>
           ))}
         </div>
       )}
 
-      {/* Change History */}
       {history.length > 0 && (
         <div>
           <h3 className="text-xs text-gray-500 uppercase mb-2">Change History ({history.length})</h3>
-          <div className="space-y-1">
-            {[...history].reverse().slice(0, 15).map((h: any, i: number) => (
-              <div key={i} className="text-[10px] text-gray-500">
-                <span className="text-gray-600">[Tick {h.tick}]</span> {h.type}: {h.description}
-              </div>
-            ))}
-          </div>
+          <div className="space-y-1">{[...history].reverse().slice(0, 15).map((h: any, i: number) => <div key={i} className="text-[10px] text-gray-500"><span className="text-gray-600">[Tick {h.tick}]</span> {h.type}: {h.description}</div>)}</div>
         </div>
       )}
     </div>
   );
 }
 
-/* ==================== RESOURCES TAB ==================== */
 function ResourcesTab({ resources }: { resources: any }) {
   const entries = Object.entries(resources || {});
-
   return (
     <div className="space-y-4 max-w-2xl">
       <div className="text-xs text-gray-500">{entries.length} resource types in the world</div>
-
-      {entries.length === 0 ? (
-        <p className="text-gray-600 italic text-sm">No resource data available</p>
-      ) : (
+      {entries.length === 0 ? <p className="text-gray-600 italic text-sm">No resource data available</p> : (
         <div className="space-y-2">
           {entries.map(([name, data]: [string, any]) => {
             const qty = data.quantity || 0;
             const renewable = data.renewable;
             const regen = data.regen_rate || 0;
             const locations = Array.isArray(data.locations) ? data.locations : [data.locations];
-            const maxQty = 500;
-            const pct = Math.min(100, (qty / maxQty) * 100);
+            const pct = Math.min(100, (qty / 500) * 100);
             const color = qty > 100 ? "bg-green-500" : qty > 30 ? "bg-yellow-500" : "bg-red-500";
-
             return (
               <div key={name} className="bg-gray-900 rounded-lg border border-gray-800 p-3">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-gray-200 capitalize">{name.replace(/_/g, " ")}</span>
-                  <span className="text-xs text-gray-400">
-                    {qty} {renewable ? `(+${regen}/cycle)` : "(finite)"}
-                  </span>
-                </div>
-                <div className="w-full bg-gray-800 rounded-full h-2 mb-1">
-                  <div className={`${color} h-2 rounded-full`} style={{ width: `${pct}%` }} />
-                </div>
-                <div className="text-[10px] text-gray-600">
-                  Found at: {locations.join(", ")}
-                </div>
+                <div className="flex items-center justify-between mb-1"><span className="text-sm text-gray-200 capitalize">{name.replace(/_/g, " ")}</span><span className="text-xs text-gray-400">{qty} {renewable ? `(+${regen}/cycle)` : "(finite)"}</span></div>
+                <div className="w-full bg-gray-800 rounded-full h-2 mb-1"><div className={`${color} h-2 rounded-full`} style={{ width: `${pct}%` }} /></div>
+                <div className="text-[10px] text-gray-600">Found at: {locations.join(", ")}</div>
               </div>
             );
           })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ==================== BULLETIN TAB ==================== */
-function BulletinTab({ posts }: { posts: any[] }) {
-  return (
-    <div className="space-y-3 max-w-2xl">
-      <div className="text-xs text-gray-500">{posts.length} posts on the bulletin board</div>
-
-      {posts.length === 0 ? (
-        <div className="text-center py-12">
-          <p className="text-gray-500 text-sm">No posts yet. Agents will start posting thoughts, news, and announcements here.</p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {[...posts].reverse().map((p: any, i: number) => (
-            <div key={i} className="bg-gray-900 rounded-lg border border-gray-800 p-3">
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-xs font-medium text-amber-400">{p.author_name}</span>
-                <span className="text-[9px] text-gray-600">Day {p.day}</span>
-              </div>
-              <p className="text-sm text-gray-300 leading-relaxed">{p.content}</p>
-            </div>
-          ))}
         </div>
       )}
     </div>

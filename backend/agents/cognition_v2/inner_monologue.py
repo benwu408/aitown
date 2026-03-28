@@ -100,6 +100,32 @@ async def generate_thought(agent, location: str, time_of_day: str, activity: str
         agent.inner_thought = thought
         agent.working_memory.push(thought)
 
+        # Let some thoughts shape the active cognitive state, not just the UI.
+        if thought_type in {"worry", "frustration"}:
+            agent.working_memory.set_worry(thought)
+        elif thought_type in {"daydream", "gratitude"}:
+            agent.working_memory.set_desire(thought)
+        elif thought_type in {"self_talk", "realization", "question"}:
+            agent.working_memory.set_goal(thought)
+            if thought_type in {"self_talk", "realization"}:
+                agent.active_goals.append({
+                    "text": thought,
+                    "status": "active",
+                    "source": "inner_monologue",
+                    "priority": 0.55,
+                    "created_tick": 0,
+                })
+                agent.active_intentions.insert(0, {
+                    "goal": thought,
+                    "why": "It surfaced strongly in my inner voice.",
+                    "urgency": 0.52,
+                    "source": "inner_monologue",
+                    "target_location": agent.current_location,
+                    "next_step": "follow through on this thought",
+                    "status": "candidate",
+                })
+                agent.active_intentions = agent.active_intentions[:8]
+
         # Store important thoughts as episodic memories
         if thought_type in MEMORABLE_TYPES:
             agent.episodic_memory.add_simple(

@@ -33,6 +33,22 @@ class AgentV2:
         self.current_action = ActionType.IDLE
         self.inner_thought: str = "Where am I? What do we do now?"
         self.daily_plan: str = ""
+        self.daily_schedule: list[dict] = []
+        self.current_plan_step: dict | None = None
+        self.long_term_goals: list[dict] = []
+        self.active_intentions: list[dict] = []
+        self.current_plan: dict | None = None
+        self.fallback_plan: dict | None = None
+        self.blocked_reasons: list[dict] = []
+        self.decision_rationale: dict = {}
+        self.life_events: list[dict] = []
+        self.reciprocity_ledger: dict[str, dict] = {}
+        self.proposal_stances: dict[str, dict] = {}
+        self.project_roles: list[dict] = []
+        self.current_institution_roles: list[dict] = []
+        self.active_conflicts: list[dict] = []
+        self.plan_mode: str = "improvising"
+        self.plan_deviation_reason: str = ""
         self.self_concept: str | None = None  # Emerges over time
 
         # V2 Cognitive Architecture
@@ -67,6 +83,7 @@ class AgentV2:
         self.daily_income: float = 0
         self.daily_expenses: float = 0
         self.social_commitments: list[dict] = []
+        self.current_commitment: dict | None = None
         self.opinions: dict = {}
         self.secrets: list[dict] = []
         self.reputation: dict = {"generosity": 0.5, "honesty": 0.5, "reliability": 0.5, "kindness": 0.5}
@@ -75,8 +92,15 @@ class AgentV2:
         self.path: list[tuple[int, int]] = []
         self.path_index: int = 0
         self.move_target: str | None = None
+        self.paused_path: list[tuple[int, int]] = []
+        self.paused_path_index: int = 0
+        self.paused_move_target: str | None = None
+        self.talking_until_tick: int = 0
+        self.sleep_until_tick: int = 0
+        seed = sum(ord(ch) for ch in profile.id)
+        self.sleep_start_hour: int = 21 + (seed % 4)
+        self.wake_hour: int = 5 + ((seed // 3) % 3)
 
-        # No schedule — driven by needs
         self.is_in_conversation: bool = False
         self.conversation_cooldown: int = 0  # Ticks before agent can chat again
 
@@ -85,9 +109,122 @@ class AgentV2:
         self.working_memory.push("I need to find food, water, and shelter.")
         self.working_memory.set_worry("What if there isn't enough for everyone?")
 
+    def inventory_count(self, item_name: str) -> int:
+        total = 0
+        for item in self.inventory:
+            if item.get("name") == item_name:
+                total += int(item.get("quantity", 1))
+        return total
+
+    def consume_inventory(self, item_name: str, quantity: int) -> bool:
+        remaining = quantity
+        for item in list(self.inventory):
+            if item.get("name") != item_name:
+                continue
+            item_qty = int(item.get("quantity", 1))
+            take = min(item_qty, remaining)
+            remaining -= take
+            left = item_qty - take
+            if left > 0:
+                item["quantity"] = left
+            else:
+                self.inventory.remove(item)
+            if remaining <= 0:
+                return True
+        return remaining <= 0
+
+    def add_blocked_reason(self, reason: str, tick: int, severity: float = 0.5):
+        if not reason:
+            return
+        if any(existing.get("reason") == reason for existing in self.blocked_reasons[:5]):
+            return
+        self.blocked_reasons.insert(0, {"reason": reason, "tick": tick, "severity": round(severity, 2)})
+        self.blocked_reasons = self.blocked_reasons[:8]
+
+    def add_life_event(self, summary: str, tick: int, category: str = "milestone", impact: float = 0.5):
+        if not summary:
+            return
+        self.life_events.insert(0, {
+            "summary": summary,
+            "tick": tick,
+            "category": category,
+            "impact": round(impact, 2),
+        })
+        self.life_events = self.life_events[:20]
+
+    def set_decision_rationale(self, chosen: dict, candidates: list[dict]):
+        ranked = sorted(candidates, key=lambda item: item.get("score", 0), reverse=True)[:4]
+        self.decision_rationale = {
+            "chosen": chosen,
+            "considered": ranked,
+        }
+
+    def note_reciprocity(self, other_name: str, gave: dict | None = None, received: dict | None = None):
+        ledger = self.reciprocity_ledger.setdefault(other_name, {"gave": {}, "received": {}, "balance": 0.0})
+        if gave:
+            for item, qty in gave.items():
+                ledger["gave"][item] = ledger["gave"].get(item, 0) + qty
+                ledger["balance"] += qty
+        if received:
+            for item, qty in received.items():
+                ledger["received"][item] = ledger["received"].get(item, 0) + qty
+                ledger["balance"] -= qty
+
+    def set_proposal_stance(self, proposal_id: str, stance: str, reason: str = "", legitimacy: float = 0.0):
+        self.proposal_stances[proposal_id] = {
+            "stance": stance,
+            "reason": reason,
+            "legitimacy": round(legitimacy, 2),
+        }
+
+    def note_conflict(self, other_name: str, summary: str, tick: int, severity: float = 0.5, kind: str = "social"):
+        if not other_name or not summary:
+            return
+        if any(
+            conflict.get("with") == other_name and conflict.get("summary") == summary
+            for conflict in self.active_conflicts[:6]
+        ):
+            return
+        self.active_conflicts.insert(0, {
+            "with": other_name,
+            "summary": summary,
+            "tick": tick,
+            "severity": round(severity, 2),
+            "kind": kind,
+            "status": "active",
+        })
+        self.active_conflicts = self.active_conflicts[:8]
+
+    def resolve_conflict(self, other_name: str, contains: str = ""):
+        self.active_conflicts = [
+            conflict for conflict in self.active_conflicts
+            if not (
+                conflict.get("with") == other_name
+                and (not contains or contains.lower() in conflict.get("summary", "").lower())
+            )
+        ][:8]
+
+    def bump_identity(self, event_summary: str, role_hint: str = ""):
+        if role_hint and not self.self_concept:
+            self.self_concept = role_hint
+        best_skill = self.skill_memory.get_dominant_activity()
+        if best_skill and not self.self_concept:
+            self.self_concept = best_skill.replace("_", " ")
+        narrative_parts = []
+        if self.self_concept:
+            narrative_parts.append(f"I'm becoming {self.self_concept}.")
+        if event_summary:
+            narrative_parts.append(event_summary)
+        if self.working_memory.background_worry:
+            narrative_parts.append(f"What's weighing on me: {self.working_memory.background_worry}")
+        self.identity.self_narrative = " ".join(narrative_parts[:3]).strip()
+
     def update(self, hour: float, world) -> list[dict]:
         """Basic tick update — movement along path + location discovery."""
         events = []
+
+        if self.is_in_conversation or (self.current_action == ActionType.TALKING and self.talking_until_tick > 0):
+            return events
 
         # Continue walking if we have a path
         if self.path and self.path_index < len(self.path):
@@ -141,12 +278,44 @@ class AgentV2:
         self.move_target = target_loc
         self.current_action = ActionType.WALKING
 
+    def pause_for_conversation(self, until_tick: int):
+        if self.path and not self.paused_path:
+            self.paused_path = list(self.path)
+            self.paused_path_index = self.path_index
+            self.paused_move_target = self.move_target
+        self.path = []
+        self.path_index = 0
+        self.move_target = None
+        self.current_action = ActionType.TALKING
+        self.talking_until_tick = max(self.talking_until_tick, until_tick)
+
+    def resume_after_conversation(self):
+        if self.paused_path:
+            self.path = list(self.paused_path)
+            self.path_index = self.paused_path_index
+            self.move_target = self.paused_move_target
+            self.paused_path = []
+            self.paused_path_index = 0
+            self.paused_move_target = None
+            self.current_action = ActionType.WALKING if self.path and self.path_index < len(self.path) else ActionType.IDLE
+        else:
+            self.current_action = ActionType.IDLE
+        self.talking_until_tick = 0
+
+    def start_sleeping_until(self, until_tick: int):
+        self.current_action = ActionType.SLEEPING
+        self.sleep_until_tick = until_tick
+
+    def wake_up(self):
+        self.current_action = ActionType.IDLE
+        self.sleep_until_tick = 0
+
     def get_routine_action(self, hour: float, time_of_day: str) -> dict:
         """Drive-based routine behavior — agents only go to places they know or can see."""
         import random as _rand
 
-        # Night → sleep wherever
-        if time_of_day == "night" or hour >= 22 or hour < 5:
+        # Personal night window → head home and sleep
+        if self.prefers_sleeping_now(hour):
             home = self._find_home()
             return {"action": "sleeping", "target": home or self.current_location, "thought": "Time to rest."}
 
@@ -171,8 +340,7 @@ class AgentV2:
 
         # CRITICAL shelter need → prioritized over moderate hunger
         if self.drives.shelter_need > 0.7:
-            has_wood = any(i.get("name") == "wood" for i in self.inventory)
-            if has_wood:
+            if self.inventory_count("wood") >= 3:
                 return {"action": "building", "target": self.current_location, "thought": "I have wood. Time to build a shelter."}
             # Go to forest to gather wood
             forest_locs = self.world_model.get_known_resource_locations("wood")
@@ -256,10 +424,23 @@ class AgentV2:
 
     def _find_home(self) -> str | None:
         """Find the agent's claimed shelter."""
+        if self.current_location in self.world.locations:
+            current = self.world.locations[self.current_location]
+            if current.get("type") == "built_structure" and current.get("claimed_by") == self.name:
+                return self.current_location
+
         for loc_id, claim in self.world_model.known_claims.items():
             if claim.get("claimed_by") == self.name:
                 return loc_id
+
+        for loc_id, loc in self.world.locations.items():
+            if loc.get("type") == "built_structure" and loc.get("claimed_by") == self.name:
+                self.world_model.learn_claim(loc_id, self.name, loc.get("designated_purpose", ""))
+                return loc_id
         return None
+
+    def prefers_sleeping_now(self, hour: float) -> bool:
+        return hour >= self.sleep_start_hour or hour < self.wake_hour
 
     def to_dict(self) -> dict:
         dominant_emotion, intensity = self.emotional_state.get_dominant_emotion()
@@ -276,6 +457,7 @@ class AgentV2:
             "emotion": self.emotion,
             "innerThought": self.inner_thought,
             "colorIndex": self.profile.color_index,
+            "sleepWindow": {"startHour": self.sleep_start_hour, "wakeHour": self.wake_hour},
             "summary": self._get_summary(),
             "state": {
                 "energy": round(1.0 - self.drives.rest, 2),
@@ -291,6 +473,20 @@ class AgentV2:
             "workingMemory": self.working_memory.to_dict(),
             "transactions": [],
             "inventory": [{"name": i.get("name", str(i))} for i in self.inventory[:5]],
+            "socialCommitments": self.social_commitments[:5],
+            "longTermGoals": self.long_term_goals[:5],
+            "activeIntentions": self.active_intentions[:5],
+            "currentPlan": self.current_plan,
+            "fallbackPlan": self.fallback_plan,
+            "blockedReasons": self.blocked_reasons[:5],
+            "decisionRationale": self.decision_rationale,
+            "proposalStances": self.proposal_stances,
+            "projectRoles": self.project_roles[:5],
+            "currentInstitutionRoles": self.current_institution_roles[:5],
+            "activeConflicts": self.active_conflicts[:5],
+            "planMode": self.plan_mode,
+            "planDeviationReason": self.plan_deviation_reason,
+            "currentPlanStep": self.current_plan_step,
         }
 
     def _get_summary(self) -> str:
@@ -315,7 +511,22 @@ class AgentV2:
             "backstory": self.profile.backstory,
             "physicalTraits": self.profile.physical_traits,
             "dailyPlan": self.daily_plan,
+            "longTermGoals": self.long_term_goals,
+            "activeIntentions": self.active_intentions,
+            "currentPlan": self.current_plan,
+            "fallbackPlan": self.fallback_plan,
+            "blockedReasons": self.blocked_reasons,
+            "decisionRationale": self.decision_rationale,
+            "planMode": self.plan_mode,
+            "planDeviationReason": self.plan_deviation_reason,
             "selfConcept": self.self_concept,
+            "identityNarrative": self.identity.self_narrative,
+            "lifeEvents": self.life_events,
+            "reciprocityLedger": self.reciprocity_ledger,
+            "proposalStances": self.proposal_stances,
+            "projectRoles": self.project_roles,
+            "currentInstitutionRoles": self.current_institution_roles,
+            "activeConflicts": self.active_conflicts,
             "secrets": [],
             "opinions": {},
             "reputation": self.reputation,
@@ -324,9 +535,12 @@ class AgentV2:
             "memories": self.episodic_memory.to_list(50),
             "beliefs": self.belief_system.to_list(),
             "mentalModels": self.mental_models.to_dict(),
+            "socialModels": self.mental_models.to_dict(),
             "skills": self.skill_memory.to_dict(),
             "worldKnowledge": self.world_model.to_dict(),
             "relationships": self.relationships,
             "transactions": [],
-            "schedule": [],
+            "schedule": self.daily_schedule,
+            "currentPlanStep": self.current_plan_step,
+            "currentCommitment": self.current_commitment,
         }

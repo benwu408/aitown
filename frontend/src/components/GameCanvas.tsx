@@ -20,6 +20,7 @@ export default function GameCanvas({ onAgentClick }: Props) {
   const agentSpritesRef = useRef<Map<string, Container>>(new Map());
   const agentPosRef = useRef<Map<string, { tx: number; ty: number; cx: number; cy: number }>>(new Map());
   const speechSpriteRef = useRef<Map<string, Container>>(new Map());
+  const animatedTreesRef = useRef<Array<{ canopy: Container; baseX: number; phase: number; sway: number }>>([]);
   const dragRef = useRef({ dragging: false, lastX: 0, lastY: 0, moved: false });
   const unsubRef = useRef<(() => void) | null>(null);
   const unsubBuildingsRef = useRef<(() => void) | null>(null);
@@ -125,6 +126,7 @@ export default function GameCanvas({ onAgentClick }: Props) {
         const grid = state.tileGrid;
         if (grid && grid.length > 0) {
           tileContainer.removeChildren();
+          animatedTreesRef.current = [];
           renderMapFromGrid(tileContainer, grid);
           // Re-render buildings too
           const bc = buildingContainerRef.current;
@@ -204,6 +206,12 @@ export default function GameCanvas({ onAgentClick }: Props) {
             wc.x += (targetX - wc.x) * 0.08;
             wc.y += (targetY - wc.y) * 0.08;
           }
+        }
+
+        const treeTime = performance.now() * 0.0015;
+        for (const tree of animatedTreesRef.current) {
+          tree.canopy.x = tree.baseX + Math.sin(treeTime + tree.phase) * tree.sway;
+          tree.canopy.rotation = Math.sin(treeTime * 0.8 + tree.phase) * 0.018;
         }
 
         // Speech bubbles — keyed by agentId (one bubble per agent, replaces on new speech)
@@ -465,7 +473,11 @@ export default function GameCanvas({ onAgentClick }: Props) {
         const { x, y } = gridToScreen(col, row);
         const s = seed(col, row);
 
+        const tileContainer = new Container();
+        tileContainer.x = x;
+        tileContainer.y = y;
         const g = new Graphics();
+        tileContainer.addChild(g);
         let baseColor = TILE_COLORS[tile.type] || TILE_COLORS.grass;
 
         // Subtle color variation for grass
@@ -489,27 +501,27 @@ export default function GameCanvas({ onAgentClick }: Props) {
 
         // Draw tile diamond
         g.poly([
-          { x: x, y: y - TILE_HEIGHT / 2 },
-          { x: x + TILE_WIDTH / 2, y: y },
-          { x: x, y: y + TILE_HEIGHT / 2 },
-          { x: x - TILE_WIDTH / 2, y: y },
+          { x: 0, y: -TILE_HEIGHT / 2 },
+          { x: TILE_WIDTH / 2, y: 0 },
+          { x: 0, y: TILE_HEIGHT / 2 },
+          { x: -TILE_WIDTH / 2, y: 0 },
         ]);
         g.fill(baseColor);
 
         // Subtle grid lines
         g.poly([
-          { x: x, y: y - TILE_HEIGHT / 2 },
-          { x: x + TILE_WIDTH / 2, y: y },
-          { x: x, y: y + TILE_HEIGHT / 2 },
-          { x: x - TILE_WIDTH / 2, y: y },
+          { x: 0, y: -TILE_HEIGHT / 2 },
+          { x: TILE_WIDTH / 2, y: 0 },
+          { x: 0, y: TILE_HEIGHT / 2 },
+          { x: -TILE_WIDTH / 2, y: 0 },
         ]);
         g.stroke({ width: 0.3, color: 0x000000, alpha: 0.06 });
 
         // Path cobblestone dots
         if (tile.type === "path" && s > 0.3) {
           for (let i = 0; i < 3; i++) {
-            const px = x + (((col * 3 + i * 7) % 11) - 5) * 2;
-            const py = y + (((row * 5 + i * 3) % 7) - 3);
+            const px = (((col * 3 + i * 7) % 11) - 5) * 2;
+            const py = (((row * 5 + i * 3) % 7) - 3);
             g.circle(px, py, 1);
             g.fill({ color: 0x9e8b5e, alpha: 0.4 });
           }
@@ -517,41 +529,61 @@ export default function GameCanvas({ onAgentClick }: Props) {
 
         // Grass tufts
         if ((tile.type === "grass" || tile.type === "dark_grass") && s > 0.7 && !tile.building && !tile.decoration) {
-          g.moveTo(x - 2, y);
-          g.lineTo(x - 1, y - 4);
-          g.lineTo(x, y);
+          g.moveTo(-2, 0);
+          g.lineTo(-1, -4);
+          g.lineTo(0, 0);
           g.stroke({ width: 1, color: 0x3a6b2e, alpha: 0.5 });
-          g.moveTo(x + 1, y - 1);
-          g.lineTo(x + 2, y - 5);
-          g.lineTo(x + 3, y - 1);
+          g.moveTo(1, -1);
+          g.lineTo(2, -5);
+          g.lineTo(3, -1);
           g.stroke({ width: 1, color: 0x3a6b2e, alpha: 0.4 });
         }
 
-        // Trees — multi-layered
+        // Trees — multi-layered and animated according to remaining wood
         if (tile.decoration === "tree") {
-          // Trunk
-          g.rect(x - 2, y - 2, 4, 8);
-          g.fill(0x5c3a1e);
-          g.rect(x - 1, y - 1, 2, 6);
-          g.fill(0x6b4423);
+          const woodLevel = Math.max(1, Math.min(3, tile.resourceState?.wood || 3));
+          const trunk = new Graphics();
+          trunk.rect(-2, -2, 4, 8);
+          trunk.fill(0x5c3a1e);
+          trunk.rect(-1, -1, 2, 6);
+          trunk.fill(0x6b4423);
+          tileContainer.addChild(trunk);
 
-          // Canopy — 3 layers for depth
+          const canopy = new Container();
+          const canopyGraphic = new Graphics();
           const treeColors = [0x2d5a1e, 0x357a24, 0x2a5219];
           const tc = treeColors[Math.floor(s * 3)];
-          g.poly([{ x: x, y: y - 22 }, { x: x + 10, y: y - 4 }, { x: x - 10, y: y - 4 }]);
-          g.fill(darkenColor(tc, 0.8));
-          g.poly([{ x: x, y: y - 26 }, { x: x + 8, y: y - 10 }, { x: x - 8, y: y - 10 }]);
-          g.fill(tc);
-          g.poly([{ x: x, y: y - 29 }, { x: x + 5, y: y - 16 }, { x: x - 5, y: y - 16 }]);
-          g.fill(darkenColor(tc, 1.2));
+          const widthScale = woodLevel === 3 ? 1 : woodLevel === 2 ? 0.82 : 0.62;
+          const heightScale = woodLevel === 3 ? 1 : woodLevel === 2 ? 0.88 : 0.74;
+          canopyGraphic.poly([{ x: 0, y: -22 * heightScale }, { x: 10 * widthScale, y: -4 }, { x: -10 * widthScale, y: -4 }]);
+          canopyGraphic.fill(darkenColor(tc, 0.8));
+          canopyGraphic.poly([{ x: 0, y: -26 * heightScale }, { x: 8 * widthScale, y: -10 }, { x: -8 * widthScale, y: -10 }]);
+          canopyGraphic.fill(tc);
+          canopyGraphic.poly([{ x: 0, y: -29 * heightScale }, { x: 5 * widthScale, y: -16 }, { x: -5 * widthScale, y: -16 }]);
+          canopyGraphic.fill(darkenColor(tc, 1.2));
+          canopy.addChild(canopyGraphic);
+          tileContainer.addChild(canopy);
+          animatedTreesRef.current.push({
+            canopy,
+            baseX: 0,
+            phase: (col * 0.37) + (row * 0.61),
+            sway: 0.35 + (woodLevel * 0.18),
+          });
+        }
+
+        if (tile.decoration === "stump") {
+          g.ellipse(0, 0, 5, 3);
+          g.fill(0x6b4423);
+          g.ellipse(0, -1, 4, 2);
+          g.fill(0x8a5a35);
         }
 
         // Flowers — varied
         if (tile.decoration === "flower") {
           const flowerTypes = [0xff6b9d, 0xffd93d, 0xff8a5c, 0xc084fc, 0x64b5f6, 0xff7043];
           for (let i = 0; i < 5; i++) {
-            const fx = x + (((col * 3 + i * 11) % 13) - 6);
-            const fy = y + (((row * 7 + i * 5) % 9) - 4);
+            const fx = (((col * 3 + i * 11) % 13) - 6);
+            const fy = (((row * 7 + i * 5) % 9) - 4);
             const fc = flowerTypes[(col + row + i) % flowerTypes.length];
             // Stem
             g.moveTo(fx, fy + 2);
@@ -567,11 +599,11 @@ export default function GameCanvas({ onAgentClick }: Props) {
 
         // Water ripple circles
         if (tile.type === "water") {
-          g.circle(x + (s * 10 - 5), y + (s * 6 - 3), 3 + s * 4);
+          g.circle((s * 10 - 5), (s * 6 - 3), 3 + s * 4);
           g.stroke({ width: 0.5, color: 0x5090c0, alpha: 0.3 });
         }
 
-        container.addChild(g);
+        container.addChild(tileContainer);
       }
     }
   }

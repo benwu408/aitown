@@ -3,52 +3,61 @@ import { useSimulationStore } from "../stores/simulationStore";
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
   const store = useSimulationStore;
 
   useEffect(() => {
-    const wsUrl =
-      import.meta.env.VITE_WS_URL ||
-      `ws://${window.location.hostname}:8000/ws`;
+    let cancelled = false;
 
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+    const connect = () => {
+      if (cancelled) return;
+      const wsUrl =
+        import.meta.env.VITE_WS_URL ||
+        `ws://${window.location.hostname}:8000/ws`;
 
-    ws.onopen = () => {
-      store.getState().setConnected(true);
-    };
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-    ws.onclose = () => {
-      store.getState().setConnected(false);
-      // Reconnect after 2s
-      setTimeout(() => {
-        if (wsRef.current === ws) {
-          // Will be replaced by new effect if component remounts
+      ws.onopen = () => {
+        store.getState().setConnected(true);
+      };
+
+      ws.onclose = () => {
+        store.getState().setConnected(false);
+        if (!cancelled) {
+          reconnectTimerRef.current = window.setTimeout(connect, 2000);
         }
-      }, 2000);
-    };
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
 
-        if (msg.type === "world_state") {
-          store.getState().initFromWorldState(msg.data);
-        } else if (msg.type === "tick") {
-          store.getState().updateFromTick(msg.data);
-        } else if (msg.type === "agent_detail") {
-          store.getState().setAgentDetail(msg.data);
-        } else if (msg.type === "dashboard_data") {
-          store.getState().setDashboardData(msg.data);
-        } else if (msg.type === "autobiography") {
-          store.getState().setAutobiography(msg.data);
+          if (msg.type === "world_state") {
+            store.getState().initFromWorldState(msg.data);
+          } else if (msg.type === "tick") {
+            store.getState().updateFromTick(msg.data);
+          } else if (msg.type === "agent_detail") {
+            store.getState().setAgentDetail(msg.data);
+          } else if (msg.type === "dashboard_data") {
+            store.getState().setDashboardData(msg.data);
+          } else if (msg.type === "autobiography") {
+            store.getState().setAutobiography(msg.data);
+          }
+        } catch (e) {
+          console.error("Failed to parse WS message:", e);
         }
-      } catch (e) {
-        console.error("Failed to parse WS message:", e);
-      }
+      };
     };
+
+    connect();
 
     return () => {
-      ws.close();
+      cancelled = true;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      wsRef.current?.close();
     };
   }, []);
 

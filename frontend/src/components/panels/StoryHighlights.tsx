@@ -13,6 +13,51 @@ interface Props {
   onAgentClick: (agentId: string) => void;
 }
 
+function formatHighlight(h: any): { title: string; detail: string } {
+  const raw = String(h?.text || "").trim();
+  const agentName = h?.agentName || "";
+
+  if (h?.type === "new_goal") {
+    if (raw.toLowerCase().includes("wants to:")) {
+      const [title, ...rest] = raw.split(":");
+      return { title: title.trim(), detail: rest.join(":").trim() };
+    }
+    return {
+      title: agentName ? `${agentName} wants to` : "New intention",
+      detail: raw,
+    };
+  }
+
+  if (h?.type === "achievement") {
+    if (raw.includes(":")) {
+      const [title, ...rest] = raw.split(":");
+      return { title: title.trim(), detail: rest.join(":").trim() };
+    }
+    return {
+      title: agentName ? `${agentName} achieved something` : "Achievement",
+      detail: raw,
+    };
+  }
+
+  if (h?.type === "crisis") {
+    if (raw.includes(":")) {
+      const [title, ...rest] = raw.split(":");
+      return { title: title.trim(), detail: rest.join(":").trim() };
+    }
+    return { title: "World event", detail: raw };
+  }
+
+  if (raw.includes(":")) {
+    const [title, ...rest] = raw.split(":");
+    return { title: title.trim(), detail: rest.join(":").trim() };
+  }
+
+  return {
+    title: agentName || "Story beat",
+    detail: raw,
+  };
+}
+
 export default function StoryHighlights({ onAgentClick }: Props) {
   const highlights = useSimulationStore((s) => s.storyHighlights);
   const [collapsed, setCollapsed] = useState(false);
@@ -38,14 +83,20 @@ export default function StoryHighlights({ onAgentClick }: Props) {
         <div className="overflow-y-auto bg-gray-900/70 backdrop-blur-sm border border-gray-700/50 border-t-0 rounded-b space-y-0.5 p-1">
           {[...recent].reverse().map((h: any, i: number) => {
             const style = TYPE_STYLES[h.type] || TYPE_STYLES.new_goal;
+            const formatted = formatHighlight(h);
             return (
               <div
                 key={i}
                 onClick={() => h.agentId && onAgentClick(h.agentId)}
                 className={`px-2 py-1 rounded border text-[9px] leading-tight cursor-pointer hover:brightness-125 transition-all ${style.bg} ${style.color}`}
               >
-                <span className="font-bold mr-0.5 opacity-60">[{style.icon}]</span>
-                {h.text}
+                <div className="flex items-start gap-1">
+                  <span className="font-bold opacity-60 shrink-0">[{style.icon}]</span>
+                  <div className="min-w-0">
+                    <div className="font-semibold">{formatted.title}</div>
+                    <div className="opacity-90 text-[8px]">{formatted.detail}</div>
+                  </div>
+                </div>
               </div>
             );
           })}

@@ -148,12 +148,40 @@ function StatusContent({ agent, detail }: { agent: any; detail: any }) {
         <Row label="Activity" value={agent.currentAction} />
         <Row label="Location" value={agent.currentLocation.replace(/_/g, " ")} />
         <Row label="Emotion" value={agent.emotion} />
+        <Row label="Plan Mode" value={(detail?.planMode || agent.planMode || "improvising").replace(/_/g, " ")} />
         <Row
           label="Wealth"
           value={`${agent.state.wealth} coins`}
           valueClass="text-amber-400"
         />
       </div>
+
+      {(detail?.currentPlanStep || agent.currentPlanStep) && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Current Plan Step</div>
+          <div className="p-2 bg-amber-900/10 border border-amber-900/30 rounded text-gray-300">
+            {((detail?.currentPlanStep || agent.currentPlanStep)?.label) || `${(detail?.currentPlanStep || agent.currentPlanStep)?.activity} at ${(detail?.currentPlanStep || agent.currentPlanStep)?.location}`}
+          </div>
+          {(detail?.planDeviationReason || agent.planDeviationReason) && (
+            <div className="mt-1 text-[10px] text-red-300/80">
+              Off-plan because of {detail?.planDeviationReason || agent.planDeviationReason}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {(detail?.decisionRationale || agent.decisionRationale) && (detail?.decisionRationale?.chosen || agent.decisionRationale?.chosen) && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Decision Rationale</div>
+          <div className="p-2 bg-cyan-950/20 border border-cyan-900/30 rounded text-[11px]">
+            <div className="text-cyan-300">{(detail?.decisionRationale || agent.decisionRationale).chosen.description}</div>
+            <div className="text-gray-400 mt-1">{(detail?.decisionRationale || agent.decisionRationale).chosen.why}</div>
+            <div className="text-[10px] text-gray-500 mt-1">
+              Source: {(detail?.decisionRationale || agent.decisionRationale).chosen.source} | Score: {((detail?.decisionRationale || agent.decisionRationale).chosen.score ?? 0).toFixed?.(2) ?? (detail?.decisionRationale || agent.decisionRationale).chosen.score}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <BarRow label="Energy" value={agent.state.energy} color="bg-green-500" />
@@ -165,6 +193,40 @@ function StatusContent({ agent, detail }: { agent: any; detail: any }) {
         <div className="pt-2 border-t border-gray-800">
           <div className="text-[10px] text-gray-500 uppercase mb-1">Backstory</div>
           <p className="text-gray-400">{detail.backstory}</p>
+        </div>
+      )}
+
+      {detail?.identityNarrative && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Identity Narrative</div>
+          <p className="text-gray-400">{detail.identityNarrative}</p>
+        </div>
+      )}
+
+      {detail?.activeConflicts && detail.activeConflicts.length > 0 && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Active Conflicts</div>
+          <div className="space-y-1">
+            {detail.activeConflicts.slice(0, 4).map((conflict: any, i: number) => (
+              <div key={i} className="p-2 rounded bg-red-950/20 border border-red-900/30 text-[11px]">
+                <div className="text-red-200">{conflict.with}</div>
+                <div className="text-gray-400">{conflict.summary}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {detail?.currentInstitutionRoles && detail.currentInstitutionRoles.length > 0 && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Institution Roles</div>
+          <div className="space-y-1">
+            {detail.currentInstitutionRoles.slice(0, 4).map((role: any, i: number) => (
+              <div key={i} className="text-[11px] text-gray-400">
+                {role.institution_name}: {role.role}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -184,6 +246,7 @@ function EconContent({ agent, detail }: { agent: any; detail: any }) {
   const inventory = (agent as any)?.inventory || detail?.inventory || [];
   const skills = detail?.skills || {};
   const physicalTraits = detail?.physicalTraits || {};
+  const currentCommitment = detail?.currentCommitment;
 
   return (
     <div className="space-y-3 text-xs">
@@ -244,6 +307,28 @@ function EconContent({ agent, detail }: { agent: any; detail: any }) {
           </div>
         )}
       </div>
+
+      {currentCommitment && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Current Commitment</div>
+          <div className="p-2 bg-cyan-900/15 border border-cyan-900/30 rounded text-gray-300">
+            {(currentCommitment.description || currentCommitment.what) ?? "Following through on a plan"}
+          </div>
+        </div>
+      )}
+
+      {detail?.schedule && detail.schedule.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Daily Schedule</div>
+          <div className="space-y-1">
+            {detail.schedule.map((step: any, i: number) => (
+              <div key={i} className={`p-1.5 rounded border text-[10px] ${detail?.currentPlanStep?.hour === step.hour && detail?.currentPlanStep?.activity === step.activity ? "bg-amber-900/15 border-amber-700/40 text-amber-200" : "bg-gray-800/30 border-gray-800 text-gray-400"}`}>
+                <div>{step.label || `${String(step.hour).padStart(2, "0")}:00 ${step.activity}`}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

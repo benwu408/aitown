@@ -153,7 +153,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
           time: data.time.time_string,
           type: event.type,
           agentId: event.agentId,
-          agentName: agent.name,
+          agentName: agent?.name,
           text,
         });
       }
@@ -161,12 +161,14 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
 
     // Apply tile changes if any
     const tileChanges = (data as any).tileChanges;
+    const fullTileGrid = (data as any).tileGrid;
+    const fullBuildings = (data as any).buildings;
 
     set((state) => {
       // Update tile grid if we have changes
-      let tileGrid = state.tileGrid;
-      if (tileChanges && tileGrid) {
-        tileGrid = tileGrid.map(row => [...row]);
+      let tileGrid = fullTileGrid || state.tileGrid;
+      if (tileChanges && tileGrid && !fullTileGrid) {
+        tileGrid = tileGrid.map((row: any[]) => [...row]);
         for (const change of tileChanges) {
           if (tileGrid[change.row]) {
             tileGrid[change.row] = [...tileGrid[change.row]];
@@ -193,7 +195,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
         })(),
         storyHighlights: (data as any).storyHighlights || state.storyHighlights,
         ...(tileGrid ? { tileGrid } : {}),
-        ...((data as any).buildings ? { buildings: (data as any).buildings } : {}),
+        ...(fullBuildings ? { buildings: fullBuildings } : {}),
       };
     });
   },

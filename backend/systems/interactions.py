@@ -3,6 +3,7 @@
 import logging
 import random
 import math
+import re
 
 logger = logging.getLogger("agentica.interactions")
 
@@ -80,7 +81,11 @@ class InteractionDecider:
 
         for p in perceived:
             other = p["agent"]
-            if not p["can_talk"] or getattr(other, "is_in_conversation", False):
+            if (
+                not p["can_talk"]
+                or getattr(other, "is_in_conversation", False)
+                or getattr(other, "current_action", None).value == "sleeping"
+            ):
                 continue
 
             score, reason = self._score(agent, other, p)
@@ -90,9 +95,9 @@ class InteractionDecider:
                 best_reason = reason
 
         # Personality threshold — lower = more social
-        threshold = 0.15 + (1.0 - agent.profile.personality.get("extraversion", 0.5)) * 0.2
-        if agent.drives.social_need > 0.3:
-            threshold -= 0.1
+        threshold = 0.08 + (1.0 - agent.profile.personality.get("extraversion", 0.5)) * 0.12
+        if agent.drives.social_need > 0.2:
+            threshold -= 0.12
         if agent.emotional_state.anxiety > 0.5:
             threshold += 0.05
 
@@ -108,7 +113,7 @@ class InteractionDecider:
 
         # Social need
         if agent.drives.social_need > 0.2:
-            score += agent.drives.social_need * 0.4
+            score += agent.drives.social_need * 0.55
             reasons.append("want to connect")
 
         # Never talked to this person → curiosity
@@ -126,10 +131,10 @@ class InteractionDecider:
         # Both idle at same location — strong signal
         if agent.current_action.value == "idle" and other.current_action.value == "idle":
             if perceived.get("same_location"):
-                score += 0.35
+                score += 0.5
                 reasons.append("both idle together")
             else:
-                score += 0.15
+                score += 0.22
                 reasons.append("both idle nearby")
 
         # They seem upset
@@ -279,6 +284,8 @@ class ConversationV2:
         self.reason = reason
         self.turns: list[dict] = []
         self.is_active = True
+        self.structured_commitments: list[dict] = []
+        self.structured_proposals: list[dict] = []
         type_info = INTERACTION_TYPES.get(interaction_type, {"turns": (2, 4)})
         self.max_turns = random.randint(*type_info["turns"])
 
@@ -304,7 +311,7 @@ Context: {self.location}. You're all new settlers who just arrived at this place
 Start with something SPECIFIC: what you've noticed about this place, what you need help with, what you're curious about, something you discovered, or ask them about themselves. Don't just say "hello" or "how are you" — say something with substance. 1-2 sentences.
 
 Return JSON:
-{{"speech": "what you say", "inner_thought": "what you're thinking", "tone": "warm/casual/tense/hesitant", "emotion_shift": "how this makes you feel or null"}}"""
+{{"speech": "what you say", "inner_thought": "what you're thinking", "tone": "warm/casual/tense/hesitant", "emotion_shift": "how this makes you feel or null", "actionable": {{"kind": "decision_to_meet/decision_to_gather/decision_to_build/decision_to_visit/proposal/request/offer/promise/agreement/meeting_invitation/barter_offer/support_signal/opposition_signal/alliance_signal/request_help or null", "description": "clear actionable statement or null", "location": "location id or null", "time_hint": "morning/noon/evening/tomorrow/number or null", "participants": ["names involved"], "required_resources": ["wood"], "recurring": false}}}}"""
         else:
             prompt = f"""You are {speaker.name} in conversation with {listener.name}.
 
@@ -323,18 +330,117 @@ RULES:
 - 1-2 sentences max. Real people don't give speeches.
 
 Return JSON:
-{{"speech": "your response", "inner_thought": "what you're thinking", "tone": "warm/casual/tense", "emotion_shift": "how this makes you feel or null", "wants_to_continue": true, "trust_shift": "up/down/same"}}"""
+{{"speech": "your response", "inner_thought": "what you're thinking", "tone": "warm/casual/tense", "emotion_shift": "how this makes you feel or null", "wants_to_continue": true, "trust_shift": "up/down/same", "actionable": {{"kind": "decision_to_meet/decision_to_gather/decision_to_build/decision_to_visit/proposal/request/offer/promise/agreement/meeting_invitation/barter_offer/support_signal/opposition_signal/alliance_signal/request_help or null", "description": "clear actionable statement or null", "location": "location id or null", "time_hint": "morning/noon/evening/tomorrow/number or null", "participants": ["names involved"], "required_resources": ["wood"], "recurring": false}}}}"""
 
         result = await llm_client.generate_json(
             f"You are {speaker.name}, a {speaker.profile.age}-year-old in a new settlement.",
             prompt,
-            default={"speech": "...", "inner_thought": "", "tone": "casual"},
+            default={"speech": "...", "inner_thought": "", "tone": "casual", "actionable": None},
         )
+        actionable = normalize_actionable_payload(result.get("actionable"), speaker, listener, self.location)
+        if actionable:
+            result["actionable"] = actionable
+            if actionable["kind"] == "proposal":
+                self.structured_proposals.append(actionable)
+            else:
+                self.structured_commitments.append(actionable)
         self.turns.append({"speaker": speaker.name, **result})
         return result
 
 
-def process_conversation_consequences(agent, other_name: str, conversation: ConversationV2):
+def _normalize_time_hint(raw_hint: str | None) -> tuple[str, int]:
+    hint = (raw_hint or "soon").strip().lower()
+    if any(word in hint for word in ("morning", "breakfast")):
+        return ("morning", 8)
+    if any(word in hint for word in ("noon", "midday", "lunch")):
+        return ("noon", 12)
+    if "afternoon" in hint:
+        return ("afternoon", 15)
+    if any(word in hint for word in ("evening", "sunset", "dinner")):
+        return ("evening", 18)
+    if "night" in hint:
+        return ("night", 20)
+    match = re.search(r"(\\d{1,2})", hint)
+    if match:
+        hour = max(0, min(23, int(match.group(1))))
+        return (hint, hour)
+    return (hint, 12)
+
+
+def normalize_actionable_payload(payload, speaker, listener, location: str) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    kind = payload.get("kind")
+    description = payload.get("description")
+    if not kind or not description:
+        return None
+    kind_map = {
+        "meeting_invitation": "meeting",
+        "request_help": "request",
+    }
+    kind = kind_map.get(kind, kind)
+    participants = payload.get("participants") or [speaker.name, listener.name]
+    if speaker.name not in participants:
+        participants.append(speaker.name)
+    if listener.name not in participants:
+        participants.append(listener.name)
+    time_hint, scheduled_hour = _normalize_time_hint(payload.get("time_hint"))
+    return {
+        "kind": kind,
+        "description": description.strip(),
+        "participants": participants,
+        "location": payload.get("location") or location,
+        "time_hint": time_hint,
+        "scheduled_hour": scheduled_hour,
+        "required_resources": payload.get("required_resources") or [],
+        "recurring": bool(payload.get("recurring", False)),
+        "status": "planned",
+    }
+
+
+def _add_commitment(agent, commitment: dict, other_name: str, tick: int, day: int):
+    scheduled_day = day + 1 if "tomorrow" in commitment.get("time_hint", "") or tick > 0 else max(day, 1)
+    full_commitment = {
+        **commitment,
+        "scheduled_day": scheduled_day,
+        "source_conversation_tick": tick,
+        "with": [name for name in commitment["participants"] if name != agent.name],
+    }
+    duplicate = any(
+        existing.get("kind") == full_commitment["kind"]
+        and existing.get("description") == full_commitment["description"]
+        and existing.get("location") == full_commitment["location"]
+        and existing.get("scheduled_day") == full_commitment["scheduled_day"]
+        and existing.get("scheduled_hour") == full_commitment["scheduled_hour"]
+        for existing in agent.social_commitments
+    )
+    if not duplicate:
+        agent.social_commitments.append(full_commitment)
+        agent.active_intentions.insert(0, {
+            "goal": full_commitment["description"],
+            "why": f"I made this plan with {other_name}.",
+            "urgency": 0.72,
+            "source": "commitment",
+            "target_location": full_commitment["location"],
+            "next_step": full_commitment["description"],
+            "status": "active",
+        })
+        agent.active_intentions = agent.active_intentions[:8]
+        agent.working_memory.unfinished_business = full_commitment["description"]
+        agent.episodic_memory.add_simple(
+            f"Made plans with {other_name}: {full_commitment['description']}",
+            tick=tick,
+            day=day,
+            time_of_day="",
+            location=full_commitment["location"],
+            category="action",
+            intensity=0.7,
+            emotion="hopeful",
+            agents=[other_name],
+        )
+
+
+def process_conversation_consequences(agent, other_name: str, conversation: ConversationV2, tick: int = 0, day: int = 0):
     """Apply all consequences of a completed conversation."""
     # Update relationship
     if other_name not in agent.relationships:
@@ -365,12 +471,147 @@ def process_conversation_consequences(agent, other_name: str, conversation: Conv
         t.get("speech", "...")[:40] for t in conversation.turns[:3]
     )
     agent.episodic_memory.add_simple(
-        summary, tick=0, day=0, time_of_day="", location=conversation.location,
+        summary, tick=tick, day=day, time_of_day="", location=conversation.location,
         category="conversation", intensity=0.5, agents=[other_name],
     )
 
     # Update mental model
-    agent.mental_models.update_from_interaction(other_name, tick=0)
+    if conversation.interaction_type != "argument":
+        agent.mental_models.update_from_interaction(
+            other_name,
+            tick=tick,
+            trust_delta=0.02,
+            comfort_delta=0.02,
+            emotional_safety_delta=0.03,
+            alliance_delta=0.01,
+        )
+    else:
+        model = agent.mental_models.get_or_create(other_name)
+        model.unresolved_issues.append(f"Argument on day {day}")
+        model.unresolved_issues = model.unresolved_issues[-4:]
+        agent.mental_models.update_from_interaction(
+            other_name,
+            tick=tick,
+            trust_delta=-0.03,
+            emotional_safety_delta=-0.06,
+            alliance_delta=-0.05,
+        )
+
+    for commitment in conversation.structured_commitments:
+        if agent.name in commitment.get("participants", []):
+            _add_commitment(agent, commitment, other_name, tick, day)
+
+        kind = commitment.get("kind")
+        description = commitment.get("description", "")
+        if kind in {"barter_offer", "offer"}:
+            agent.active_intentions.insert(0, {
+                "goal": f"Work out a trade with {other_name}",
+                "why": f"{other_name} floated a concrete exchange: {description}",
+                "urgency": 0.58,
+                "source": "trade",
+                "target_location": commitment.get("location") or conversation.location,
+                "next_step": description,
+                "status": "active",
+            })
+            agent.note_reciprocity(other_name)
+            agent.mental_models.update_from_interaction(
+                other_name,
+                tick=tick,
+                generosity_delta=0.03,
+                reliability_delta=0.02,
+                alliance_delta=0.02,
+            )
+        elif kind == "support_signal":
+            agent.active_intentions.insert(0, {
+                "goal": f"Build support with {other_name}",
+                "why": f"{other_name} signaled support: {description}",
+                "urgency": 0.56,
+                "source": "support",
+                "target_location": commitment.get("location") or conversation.location,
+                "next_step": "Keep the coalition together",
+                "status": "active",
+            })
+            agent.mental_models.update_from_interaction(
+                other_name,
+                tick=tick,
+                trust_delta=0.03,
+                alliance_delta=0.08,
+                leadership_delta=0.02,
+            )
+        elif kind == "opposition_signal":
+            model = agent.mental_models.get_or_create(other_name)
+            model.unresolved_issues.append(f"Opposed: {description}")
+            model.unresolved_issues = model.unresolved_issues[-4:]
+            agent.mental_models.update_from_interaction(
+                other_name,
+                tick=tick,
+                trust_delta=-0.03,
+                emotional_safety_delta=-0.04,
+                alliance_delta=-0.06,
+            )
+            agent.add_life_event(f"{other_name} opposed me about: {description}", tick, category="conflict", impact=0.45)
+        elif kind == "alliance_signal":
+            agent.active_intentions.insert(0, {
+                "goal": f"Coordinate more closely with {other_name}",
+                "why": f"We signaled we're on the same side: {description}",
+                "urgency": 0.54,
+                "source": "alliance",
+                "target_location": commitment.get("location") or conversation.location,
+                "next_step": "Stay in touch and act together",
+                "status": "active",
+            })
+            agent.mental_models.update_from_interaction(
+                other_name,
+                tick=tick,
+                trust_delta=0.03,
+                alliance_delta=0.1,
+                emotional_safety_delta=0.02,
+            )
+        elif kind == "request":
+            agent.active_intentions.insert(0, {
+                "goal": f"Decide whether to help {other_name}",
+                "why": f"{other_name} asked for help: {description}",
+                "urgency": 0.48,
+                "source": "request",
+                "target_location": commitment.get("location") or conversation.location,
+                "next_step": description,
+                "status": "candidate",
+            })
+        agent.active_intentions = agent.active_intentions[:8]
+
+    for proposal in conversation.structured_proposals:
+        if agent.name not in proposal.get("participants", []):
+            continue
+        agent.active_goals.append({
+            "text": f"Follow through on proposal: {proposal['description']}",
+            "status": "active",
+            "source": "conversation",
+            "priority": 0.75,
+            "created_tick": tick,
+            "kind": "proposal",
+            "location": proposal.get("location"),
+        })
+        agent.active_intentions.insert(0, {
+            "goal": proposal["description"],
+            "why": f"{other_name} and I talked seriously about making this happen.",
+            "urgency": 0.68,
+            "source": "proposal",
+            "target_location": proposal.get("location") or conversation.location,
+            "next_step": "build support for the proposal",
+            "status": "active",
+        })
+        agent.active_intentions = agent.active_intentions[:8]
+        agent.episodic_memory.add_simple(
+            f"Discussed a proposal with {other_name}: {proposal['description']}",
+            tick=tick,
+            day=day,
+            time_of_day="",
+            location=proposal.get("location", conversation.location),
+            category="reflection",
+            intensity=0.6,
+            emotion="curious",
+            agents=[other_name],
+        )
 
 
 class ObservationSystem:
