@@ -1409,7 +1409,8 @@ class SimulationEngineV2:
                 continue
             agent.inventory.append({"name": food_type, "quantity": gathered})
             agent.drives.satisfy_hunger()
-            agent.skill_memory.record_attempt("fishing" if food_type == "fish" else "gathering", True, 0.4)
+            food_enjoy = 0.35 + agent.profile.personality.get("openness", 0.5) * 0.2 if food_type == "fish" else 0.35 + agent.profile.physical_traits.get("endurance", 0.5) * 0.2
+            agent.skill_memory.record_attempt("fishing" if food_type == "fish" else "gathering", True, food_enjoy)
             agent.current_action = ActionType.EATING
             agent.emotional_state.apply_event("earned_money", 0.2)
             self._advance_current_plan(agent, "completed", f"Ate {food_type.replace('_', ' ')}.")
@@ -1422,14 +1423,17 @@ class SimulationEngineV2:
         return None
 
     def _gather_resource_for_agent(self, agent, resource: str) -> dict | None:
-        gathered = self.world.gather_resource(resource, 1, agent.current_location)
+        skill_level = agent.skill_memory.activities.get("gathering", {}).get("skill_level", 0.0)
+        amount = 1 + (1 if skill_level >= 0.3 else 0) + (1 if skill_level >= 0.7 else 0)
+        gathered = self.world.gather_resource(resource, amount, agent.current_location)
         if gathered <= 0:
             agent.current_action = ActionType.IDLE
             self._advance_current_plan(agent, "blocked", f"Couldn't get {resource}.")
             self._note_plan_outcome(agent, False, resource, f"I couldn't gather any {resource.replace('_', ' ')} here.")
             return None
         agent.inventory.append({"name": resource, "quantity": gathered})
-        agent.skill_memory.record_attempt("gathering", True, 0.45)
+        gather_enjoy = 0.35 + agent.profile.physical_traits.get("endurance", 0.5) * 0.2
+        agent.skill_memory.record_attempt("gathering", True, gather_enjoy)
         agent.current_action = ActionType.WORKING
         agent.inner_thought = f"I gathered some {resource.replace('_', ' ')}."
         self._advance_current_plan(agent, "completed", f"Gathered {resource.replace('_', ' ')}.")
@@ -1438,7 +1442,7 @@ class SimulationEngineV2:
         return {"type": "agent_action", "agentId": agent.id, "action": "working", "targetLocation": agent.current_location}
 
     def _build_shelter(self, agent, label: str | None = None, purpose: str = "shelter") -> dict | None:
-        if agent.inventory_count("wood") < 3:
+        if agent.inventory_count("wood") < 5:
             agent.inner_thought = "I still need more wood before I can build."
             self._advance_current_plan(agent, "blocked", "Not enough wood to build.")
             self._note_plan_outcome(agent, False, "building", "I don't have enough wood to build yet.")
@@ -1453,9 +1457,10 @@ class SimulationEngineV2:
             self._advance_current_plan(agent, "blocked", "The build attempt failed.")
             self._note_plan_outcome(agent, False, "building", "The build attempt fell through.")
             return None
-        agent.consume_inventory("wood", 3)
+        agent.consume_inventory("wood", 5)
         agent.drives.satisfy_shelter()
-        agent.skill_memory.record_attempt("construction", True, 0.6)
+        build_enjoy = 0.4 + agent.profile.physical_traits.get("strength", 0.5) * 0.15 + agent.profile.physical_traits.get("dexterity", 0.5) * 0.1
+        agent.skill_memory.record_attempt("construction", True, build_enjoy)
         agent.current_action = ActionType.BUILDING
         agent.emotional_state.apply_event("accomplishment", 0.6)
         agent.inner_thought = f"I built {label or 'a shelter'}!"

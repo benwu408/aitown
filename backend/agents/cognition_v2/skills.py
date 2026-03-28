@@ -36,6 +36,14 @@ class SkillMemory:
         top = self.get_best_skills(3)
         return "Skills: " + ", ".join(f"{name} ({d['skill_level']:.0%})" for name, d in top)
 
+    def get_enjoyment_summary(self) -> str:
+        if not self.activities:
+            return "Haven't discovered what I enjoy yet."
+        enjoyed = [item for item in self.get_most_enjoyed(2) if item[1]["attempts"] >= 3]
+        if not enjoyed:
+            return "Haven't discovered what I enjoy yet."
+        return ", ".join(f"{name}" for name, d in enjoyed)
+
     def to_dict(self) -> dict:
         return dict(self.activities)
 

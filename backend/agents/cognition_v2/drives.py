@@ -14,6 +14,7 @@ class DriveSystem:
         self.purpose_need: float = 0.2
         self.safety_need: float = 0.2
         self.shelter_need: float = 0.4  # Starts high — no home yet
+        self._shelter_growth_rate: float = 0.001  # Per-tick rate, overridden by personality
 
         self._prev_dominant: str = ""
 
@@ -53,7 +54,7 @@ class DriveSystem:
         if has_home:
             self.shelter_need = max(0.0, self.shelter_need - 0.005)
         else:
-            self.shelter_need = min(1.0, self.shelter_need + 0.001)
+            self.shelter_need = min(1.0, self.shelter_need + self._shelter_growth_rate)
 
     def satisfy_hunger(self):
         self.hunger = max(0.0, self.hunger - 0.6)
