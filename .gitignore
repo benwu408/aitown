@@ -35,3 +35,7 @@ models_cache/
 
 # Logs
 *.log
+
+# Claude tooling
+.claude-flow/
+.context/
