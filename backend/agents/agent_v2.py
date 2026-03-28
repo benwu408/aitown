@@ -56,7 +56,11 @@ class AgentV2:
         self.emotional_state = EmotionalState(baseline_valence=baseline_v)
         self.drives = DriveSystem()
         self.drives.hunger = 0.5  # Haven't eaten in a while — need food soon
-        self.drives.shelter_need = 0.4  # No home
+        # Personality-seeded shelter urgency: neurotic agents feel it sooner, open agents are fine roughing it
+        neuro = profile.personality.get("neuroticism", 0.5)
+        openness = profile.personality.get("openness", 0.5)
+        self.drives.shelter_need = 0.15 + neuro * 0.3 - openness * 0.1
+        self.drives._shelter_growth_rate = 0.0007 + neuro * 0.0006 + profile.personality.get("conscientiousness", 0.5) * 0.0003
         self.drives.purpose_need = 0.5  # Why are we here?
         self.drives.social_need = 0.3
         self.episodic_memory = EpisodicMemory()
@@ -340,7 +344,7 @@ class AgentV2:
 
         # CRITICAL shelter need → prioritized over moderate hunger
         if self.drives.shelter_need > 0.7:
-            if self.inventory_count("wood") >= 3:
+            if self.inventory_count("wood") >= 5:
                 return {"action": "building", "target": self.current_location, "thought": "I have wood. Time to build a shelter."}
             # Go to forest to gather wood
             forest_locs = self.world_model.get_known_resource_locations("wood")

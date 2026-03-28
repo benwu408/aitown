@@ -303,6 +303,24 @@ class WorldV2:
                         tile_state["wild_plants"] = 1
                     if tile_state:
                         self.tile_resource_state[tile_key] = tile_state
+
+        # Second pass: any tree tile on the map gets wood=3 (all trees are harvestable)
+        for r_idx, tile_row in enumerate(self.tiles):
+            for c_idx, tile in enumerate(tile_row):
+                if tile.get("decoration") != "tree":
+                    continue
+                tile_key = f"{c_idx},{r_idx}"
+                if tile_key not in self.tile_resource_state:
+                    self.tile_resource_state[tile_key] = {"wood": 3}
+                elif "wood" not in self.tile_resource_state[tile_key]:
+                    self.tile_resource_state[tile_key]["wood"] = 3
+                if "wood" not in tile.get("resourceHints", []):
+                    tile.setdefault("resourceHints", []).append("wood")
+
+        # Sync global wood quantity to match actual wood on tiles
+        total_wood = sum(state.get("wood", 0) for state in self.tile_resource_state.values())
+        self.resources["wood"]["quantity"] = total_wood
+
         self._sync_tile_resource_visuals()
 
     def _sync_tile_resource_visuals(self):
@@ -378,7 +396,7 @@ class WorldV2:
 
     def _regen_tile_resources(self):
         for loc_id, loc in self.locations.items():
-            if "wood" not in loc.get("resources", []):
+            if loc.get("type") not in ("natural", "open_land", "open_space"):
                 continue
             if self.resources["wood"]["quantity"] >= RESOURCES["wood"]["quantity"]:
                 break
@@ -521,13 +539,28 @@ class WorldV2:
         logger.info("%s claimed %s for %s", agent_name, loc_id, purpose or "personal use")
         return True
 
+    def _location_has_wood(self, location: str) -> bool:
+        loc = self.locations.get(location)
+        if not loc:
+            return False
+        for dc in range(loc["width"]):
+            for dr in range(loc["height"]):
+                key = f"{loc['col'] + dc},{loc['row'] + dr}"
+                if self.tile_resource_state.get(key, {}).get("wood", 0) > 0:
+                    return True
+        return False
+
     def gather_resource(self, resource: str, amount: int, location: str) -> int:
         res = self.resources.get(resource)
         if not res:
             return 0
         locs = res["locations"] if isinstance(res["locations"], list) else [res["locations"]]
         if location not in locs:
-            return 0
+            # Allow wood gathering at any location that has trees
+            if resource == "wood" and self._location_has_wood(location):
+                pass
+            else:
+                return 0
         gathered = min(amount, res["quantity"])
         if gathered <= 0:
             return 0

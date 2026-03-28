@@ -117,6 +117,8 @@ Background worry: {worry}
 
 Your personality: {personality_desc}
 Your job: {job}
+What you're getting good at: {skill_summary}
+What you find satisfying: {enjoyment_summary}
 
 Recent reflections still on your mind:
 {recent_reflections}
@@ -199,6 +201,9 @@ async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
     goals_text = "\n".join(f"- {g['text']}" for g in agent.active_goals if g.get("status") == "active")
     reflections_text = "\n".join(f"- {r}" for r in agent.episodic_memory.reflections(5))
 
+    skill_summary = agent.skill_memory.get_prompt_summary()
+    enjoyment_summary = agent.skill_memory.get_enjoyment_summary()
+
     prompt = MORNING_PROMPT.format(
         name=agent.name,
         emotion_desc=agent.emotional_state.get_prompt_description(),
@@ -206,6 +211,8 @@ async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
         worry=agent.working_memory.background_worry or "nothing specific",
         personality_desc=personality_desc,
         job=getattr(agent.profile, 'job', None) or agent.self_concept or 'newcomer',
+        skill_summary=skill_summary,
+        enjoyment_summary=enjoyment_summary,
         recent_reflections=reflections_text or "None",
         goals=goals_text or "No specific goals",
         locations=locations,
