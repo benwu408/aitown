@@ -1,4 +1,4 @@
-"""Inner monologue — continuous stream of consciousness with typed thoughts."""
+"""Inner monologue -- per-agent stream of consciousness with typed thoughts."""
 
 import logging
 import random
@@ -11,7 +11,6 @@ THOUGHT_TYPES = [
     "physical", "nostalgia",
 ]
 
-# Thoughts that get stored as episodic memories
 MEMORABLE_TYPES = {"realization", "worry", "reaction", "frustration"}
 
 THOUGHT_PROMPT = """You are {name}'s inner voice. Generate ONE brief {thought_type} thought (1-2 sentences).
@@ -41,6 +40,28 @@ Keep it to 1-2 sentences. Make it feel like a real human inner voice.
 Most thoughts are mundane, not dramatic.
 
 Return ONLY the thought, nothing else."""
+
+# Per-agent tick tracking for staggered thought generation
+_agent_thought_schedule: dict[str, int] = {}
+THOUGHT_INTERVAL_MIN = 3
+THOUGHT_INTERVAL_MAX = 5
+
+
+def should_think_this_tick(agent, tick: int) -> bool:
+    """Check if this agent should generate a thought this tick."""
+    aid = agent.id
+    next_tick = _agent_thought_schedule.get(aid, 0)
+    if tick >= next_tick:
+        _agent_thought_schedule[aid] = tick + random.randint(THOUGHT_INTERVAL_MIN, THOUGHT_INTERVAL_MAX)
+        return True
+    return False
+
+
+def get_recent_thoughts(agent, count: int = 5) -> list[str]:
+    """Get the agent's recent inner thoughts for decision prompt inclusion."""
+    if hasattr(agent, '_recent_inner_thoughts'):
+        return agent._recent_inner_thoughts[-count:]
+    return []
 
 
 def select_thought_type(agent) -> str:
@@ -100,7 +121,12 @@ async def generate_thought(agent, location: str, time_of_day: str, activity: str
         agent.inner_thought = thought
         agent.working_memory.push(thought)
 
-        # Let some thoughts shape the active cognitive state, not just the UI.
+        # Store in per-agent recent thoughts buffer for decision prompts
+        if not hasattr(agent, '_recent_inner_thoughts'):
+            agent._recent_inner_thoughts = []
+        agent._recent_inner_thoughts.append(thought)
+        agent._recent_inner_thoughts = agent._recent_inner_thoughts[-5:]
+
         if thought_type in {"worry", "frustration"}:
             agent.working_memory.set_worry(thought)
         elif thought_type in {"daydream", "gratitude"}:
@@ -108,25 +134,19 @@ async def generate_thought(agent, location: str, time_of_day: str, activity: str
         elif thought_type in {"self_talk", "realization", "question"}:
             agent.working_memory.set_goal(thought)
             if thought_type in {"self_talk", "realization"}:
-                agent.active_goals.append({
-                    "text": thought,
-                    "status": "active",
-                    "source": "inner_monologue",
-                    "priority": 0.55,
-                    "created_tick": 0,
-                })
-                agent.active_intentions.insert(0, {
-                    "goal": thought,
-                    "why": "It surfaced strongly in my inner voice.",
-                    "urgency": 0.52,
-                    "source": "inner_monologue",
-                    "target_location": agent.current_location,
-                    "next_step": "follow through on this thought",
-                    "status": "candidate",
-                })
-                agent.active_intentions = agent.active_intentions[:8]
+                agent.add_intention(
+                    thought,
+                    "It surfaced strongly in my inner voice.",
+                    0.52,
+                    "inner_monologue",
+                    target_location=agent.current_location,
+                    next_step="follow through on this thought",
+                    status="candidate",
+                    created_tick=0,
+                    expires_after_ticks=180,
+                    refresh_on_relevance=True,
+                )
 
-        # Store important thoughts as episodic memories
         if thought_type in MEMORABLE_TYPES:
             agent.episodic_memory.add_simple(
                 f"Thought to myself: {thought}",
@@ -137,3 +157,14 @@ async def generate_thought(agent, location: str, time_of_day: str, activity: str
 
         return thought
     return None
+
+
+async def process_agent_thought(agent, tick: int, time_of_day: str) -> str | None:
+    """Per-agent thought generation. Call every tick; internally rate-limits."""
+    if agent.current_action.value == "sleeping":
+        return None
+    if not should_think_this_tick(agent, tick):
+        return None
+    return await generate_thought(
+        agent, agent.current_location, time_of_day, agent.current_action.value
+    )

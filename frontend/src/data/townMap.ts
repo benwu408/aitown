@@ -11,8 +11,8 @@ export const BUILDINGS: Building[] = [
   { type: "bakery", label: "Bakery", col: 25, row: 20, width: 2, height: 2, color: "#DEB887" },
   { type: "workshop", label: "Workshop", col: 14, row: 24, width: 3, height: 2, color: "#696969" },
   { type: "tavern", label: "Tavern", col: 22, row: 26, width: 3, height: 2, color: "#A0522D" },
-  { type: "school", label: "School", col: 28, row: 24, width: 2, height: 2, color: "#4682B4" },
-  { type: "church", label: "Church", col: 26, row: 16, width: 2, height: 3, color: "#F5F5DC" },
+  { type: "meeting_hall", label: "Meeting Hall", col: 28, row: 24, width: 2, height: 2, color: "#4682B4" },
+  { type: "common_house", label: "Common House", col: 26, row: 16, width: 2, height: 3, color: "#F5F5DC" },
   { type: "house_1", label: "House (Eleanor)", col: 14, row: 14, width: 2, height: 2, color: "#BC8F8F" },
   { type: "house_2", label: "House (John)", col: 10, row: 12, width: 2, height: 2, color: "#D2B48C" },
   { type: "house_3", label: "House (Kowalskis)", col: 16, row: 28, width: 2, height: 2, color: "#C4A882" },
@@ -97,7 +97,7 @@ const FLOWER_SPOTS = [
   [17, 12], [19, 12], [21, 12], // Around park
   [19, 20], [21, 20],           // Around town hall
   [15, 16], [16, 16],           // Near house 1
-  [27, 15], [28, 15],           // Near church
+  [27, 15], [28, 15],           // Near the common house
 ];
 
 export function generateWorldMap(): WorldMap {

@@ -47,30 +47,62 @@ def _normalize_schedule(agent, raw_schedule) -> list[dict]:
 
 def _derive_long_term_goals(agent) -> list[dict]:
     goals = []
-    if not agent._find_home():
+    for goal in getattr(agent.identity, "long_arc_goals", [])[:4]:
+        text = str(goal.get("text", "")).strip()
+        if not text:
+            continue
+        goals.append({
+            "text": text,
+            "why": goal.get("why") or "This feels tied to who I'm becoming.",
+            "priority": round(float(goal.get("priority", 0.6)), 2),
+            "category": goal.get("category", "identity"),
+            "source": goal.get("source", "identity_tension"),
+        })
+
+    if not goals and not agent._find_home():
         goals.append({
             "text": "Secure a reliable place to sleep",
-            "why": "Safety and rest matter if I'm going to last here",
+            "why": "Safety and rest matter if I'm going to last here.",
             "priority": 0.9,
             "category": "shelter",
+            "source": "survival_fallback",
         })
-    if agent.drives.hunger > 0.45:
+    if not goals and agent.drives.hunger > 0.65:
         goals.append({
-            "text": "Find dependable food sources",
-            "why": "I can't think clearly if hunger keeps pulling at me",
-            "priority": 0.75,
+            "text": "Stabilize my access to food",
+            "why": "Hunger keeps narrowing everything else.",
+            "priority": 0.82,
             "category": "food",
+            "source": "survival_fallback",
         })
-    goals.append({
-        "text": "Figure out my place in this settlement",
-        "why": "I need purpose and some direction here",
-        "priority": 0.6,
-        "category": "identity",
-    })
     return goals[:4]
 
 
-def _derive_intentions(agent, result: dict, schedule: list[dict]) -> list[dict]:
+def _derive_active_goals(agent, result: dict, tick: int) -> list[dict]:
+    goals: list[dict] = []
+    current_plan = result.get("current_plan")
+    if isinstance(current_plan, dict) and current_plan.get("goal"):
+        goals.append({
+            "text": current_plan["goal"],
+            "status": "active",
+            "source": "morning_plan",
+            "priority": round(float(current_plan.get("urgency", 0.7)), 2),
+            "created_tick": tick,
+            "kind": "daily_focus",
+        })
+    for goal in agent.long_term_goals[:3]:
+        goals.append({
+            "text": goal.get("text", ""),
+            "status": "active",
+            "source": goal.get("source", "identity_tension"),
+            "priority": goal.get("priority", 0.6),
+            "created_tick": tick,
+            "kind": "long_arc",
+        })
+    return goals[:6]
+
+
+def _derive_intentions(agent, result: dict, schedule: list[dict], tick: int) -> list[dict]:
     intentions: list[dict] = []
     must_do = result.get("must_do", []) if isinstance(result.get("must_do"), list) else []
     want_to = result.get("want_to", []) if isinstance(result.get("want_to"), list) else []
@@ -84,6 +116,9 @@ def _derive_intentions(agent, result: dict, schedule: list[dict]) -> list[dict]:
             "target_location": step.get("location", agent.current_location),
             "next_step": step.get("activity", text),
             "status": "active",
+            "created_tick": tick,
+            "expires_after_ticks": 200,
+            "refresh_on_relevance": True,
         })
     for idx, text in enumerate(want_to[:2]):
         step = schedule[min(idx + len(must_do), len(schedule) - 1)] if schedule else {"location": agent.current_location, "activity": text}
@@ -95,6 +130,9 @@ def _derive_intentions(agent, result: dict, schedule: list[dict]) -> list[dict]:
             "target_location": step.get("location", agent.current_location),
             "next_step": step.get("activity", text),
             "status": "active",
+            "created_tick": tick,
+            "expires_after_ticks": 200,
+            "refresh_on_relevance": True,
         })
     if agent.working_memory.current_goal:
         intentions.append({
@@ -105,6 +143,9 @@ def _derive_intentions(agent, result: dict, schedule: list[dict]) -> list[dict]:
             "target_location": agent.current_location,
             "next_step": "follow through on current focus",
             "status": "active",
+            "created_tick": tick,
+            "expires_after_ticks": 180,
+            "refresh_on_relevance": True,
         })
     return intentions[:6]
 
@@ -126,7 +167,10 @@ Recent reflections still on your mind:
 Active goals:
 {goals}
 
-RULES: You live in a small rural town. NO phones, NO email, NO paperwork. You can only walk places, talk to people face-to-face, buy/sell goods, work, eat, and rest.
+People you know:
+{social_context}
+
+RULES: You live in a frontier settlement. NO phones, NO email, NO paperwork. You can only walk places, talk to people face-to-face, gather resources, build, trade, eat, and rest.
 
 What does your day look like? Be realistic about who you are right now. If you're exhausted, your plan might just be "get through the day."
 
@@ -135,9 +179,11 @@ Available locations: {locations}
 Return JSON:
 {{
   "mood_on_waking": "1-2 sentence description of how the morning feels",
+  "priorities": ["ranked list of what matters most today (max 3)"],
   "must_do": ["essential tasks (max 3)"],
   "want_to": ["things you'd like to do if there's time (max 2)"],
   "avoiding": ["things you should do but are dreading (max 1)"],
+  "social_goals": ["people to talk to or relationships to tend (max 2)"],
   "current_plan": {{
     "goal": "main thing you're trying to move forward today",
     "why": "why it matters to you",
@@ -151,10 +197,10 @@ Return JSON:
   }},
   "schedule": [
     {{"hour": 7, "location": "home_id", "activity": "eating"}},
-    {{"hour": 8, "location": "workplace_id", "activity": "working"}},
-    {{"hour": 12, "location": "tavern", "activity": "eating"}},
-    {{"hour": 14, "location": "somewhere", "activity": "working or idle"}},
-    {{"hour": 18, "location": "tavern", "activity": "eating"}},
+    {{"hour": 9, "location": "clearing", "activity": "gather resources"}},
+    {{"hour": 12, "location": "clearing", "activity": "eating"}},
+    {{"hour": 14, "location": "forest_edge", "activity": "gather wood"}},
+    {{"hour": 18, "location": "clearing", "activity": "rest and socialize"}},
     {{"hour": 21, "location": "home_id", "activity": "sleeping"}}
   ]
 }}"""
@@ -173,16 +219,23 @@ Your beliefs that might be affected:
 People you interacted with today:
 {interaction_summary}
 
-Reflect honestly. This is private.
+Your skills and what you've been doing:
+{skill_context}
+
+Your sense of self right now:
+{identity_context}
+
+Reflect honestly. This is private. Think about:
 - How did today make you feel overall?
 - Did anything change how you see someone?
-- Did you learn something about yourself?
+- Did you learn something about yourself or the world?
 - What's weighing on you as you try to sleep?
+- Who are you becoming in this settlement?
 
 Return JSON:
 {{
   "evening_mood": "how you feel as the day ends",
-  "day_summary": "1-2 sentences — how would you describe today?",
+  "day_summary": "1-2 sentences -- how would you describe today?",
   "new_beliefs": [
     {{"content": "belief text", "category": "person_model or world_knowledge or self_belief", "confidence": 0.5}}
   ],
@@ -190,19 +243,30 @@ Return JSON:
     {{"agent": "name", "perception": "updated understanding", "trust_change": 0.0}}
   ],
   "self_reflection": "something you realized about yourself, or null",
+  "identity_update": "how you see your role/place in this settlement now, or null",
+  "world_lessons": ["things you learned about how this place works (max 2)"],
   "unresolved_tension": "what's going to keep you up tonight, or null",
-  "tomorrow_intention": "one thing to do tomorrow, or null"
+  "tomorrow_intention": "one thing to do tomorrow, or null",
+  "tomorrow_avoid": "one thing to avoid or be careful about tomorrow, or null"
 }}"""
 
 
 async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
     """Generate morning plan with rich cognitive context."""
     personality_desc = ", ".join(f"{k}:{v:.1f}" for k, v in agent.profile.personality.items())
-    goals_text = "\n".join(f"- {g['text']}" for g in agent.active_goals if g.get("status") == "active")
+    goals_text = "\n".join(f"- {g['text']}" for g in agent.long_term_goals[:4])
     reflections_text = "\n".join(f"- {r}" for r in agent.episodic_memory.reflections(5))
 
     skill_summary = agent.skill_memory.get_prompt_summary()
     enjoyment_summary = agent.skill_memory.get_enjoyment_summary()
+
+    social_parts = []
+    for name_key, model in list(agent.mental_models.models.items())[:6]:
+        social_parts.append(
+            f"- {name_key}: trust={model.trust:.1f}, gut={model.gut_feeling:+.1f}, "
+            f"they likely see me as {model.what_i_think_they_think_of_me or 'unclear'}"
+        )
+    social_context = "\n".join(social_parts) or "Haven't gotten to know anyone yet"
 
     prompt = MORNING_PROMPT.format(
         name=agent.name,
@@ -215,6 +279,7 @@ async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
         enjoyment_summary=enjoyment_summary,
         recent_reflections=reflections_text or "None",
         goals=goals_text or "No specific goals",
+        social_context=social_context,
         locations=locations,
     )
 
@@ -241,7 +306,8 @@ async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
     agent.daily_schedule = _normalize_schedule(agent, result.get("schedule", []))
     agent.current_plan_step = agent.daily_schedule[0] if agent.daily_schedule else None
     agent.long_term_goals = _derive_long_term_goals(agent)
-    agent.active_intentions = _derive_intentions(agent, result, agent.daily_schedule)
+    agent.active_goals = _derive_active_goals(agent, result, tick)
+    agent.active_intentions = _derive_intentions(agent, result, agent.daily_schedule, tick)
     raw_plan = result.get("current_plan") if isinstance(result.get("current_plan"), dict) else {}
     agent.current_plan = {
         "goal": raw_plan.get("goal") or (agent.active_intentions[0]["goal"] if agent.active_intentions else "Get through the day"),
@@ -266,6 +332,32 @@ async def morning_plan(agent, day: int, tick: int, locations: str) -> dict:
     agent.plan_mode = "scheduled"
     agent.plan_deviation_reason = ""
 
+    # Store structured priorities for routine behavior selection
+    priorities = result.get("priorities", [])
+    if priorities and isinstance(priorities, list):
+        agent.daily_priorities = priorities[:3]
+    else:
+        agent.daily_priorities = []
+
+    # Social goals feed into intention system
+    social_goals = result.get("social_goals", [])
+    if social_goals and isinstance(social_goals, list):
+        for sg in social_goals[:2]:
+            if sg and isinstance(sg, str):
+                agent.active_intentions.append({
+                    "goal": sg,
+                    "why": "Social connection matters to me.",
+                    "urgency": 0.4,
+                    "source": "morning_plan_social",
+                    "target_location": "clearing",
+                    "next_step": sg,
+                    "status": "candidate",
+                    "created_tick": tick,
+                    "expires_after_ticks": 180,
+                    "refresh_on_relevance": True,
+                })
+        agent.active_intentions = agent.active_intentions[:8]
+
     return result
 
 
@@ -288,12 +380,17 @@ async def evening_reflection(agent, day: int, tick: int) -> dict:
         else:
             interaction_parts.append(f"- {name}: don't know them well")
 
+    skill_context = agent.skill_memory.get_prompt_summary()
+    identity_context = agent.identity.self_narrative or "Still figuring out who I am here."
+
     prompt = EVENING_PROMPT.format(
         name=agent.name,
         todays_episodes=episodes_text or "Nothing notable happened today.",
         emotion_desc=agent.emotional_state.get_prompt_description(),
         relevant_beliefs=agent.belief_system.get_prompt_context(max_beliefs=5),
         interaction_summary="\n".join(interaction_parts) or "Didn't interact with anyone today.",
+        skill_context=skill_context,
+        identity_context=identity_context,
     )
 
     sys = f"You are {agent.name}, reflecting privately at the end of the day."
@@ -315,6 +412,20 @@ async def evening_reflection(agent, day: int, tick: int) -> dict:
                 model.perceived_personality = update["perception"]
             model.trust = max(0.0, min(1.0, model.trust + update.get("trust_change", 0)))
             model.last_updated = tick
+
+    significant_names = []
+    for name in interacted_with:
+        relevant_eps = [e for e in todays if name in getattr(e, "agents_involved", [])]
+        if any(getattr(e, "emotional_intensity", 0.0) >= 0.55 for e in relevant_eps):
+            significant_names.append(name)
+            summary = "; ".join(getattr(e, "content", "")[:120] for e in relevant_eps[-4:])
+            other_stub = type("OtherAgent", (), {"name": name})()
+            await agent.mental_models.synthesize_after_interaction(
+                agent,
+                other_stub,
+                interaction_summary=summary,
+                llm_client=llm_client,
+            )
 
     # Set tomorrow's worry
     tension = result.get("unresolved_tension")
@@ -338,25 +449,101 @@ async def evening_reflection(agent, day: int, tick: int) -> dict:
             f"Day {day}: {summary}", tick, day, "night", agent.current_location,
             category="reflection", intensity=0.5,
         )
-        recent_roles = ", ".join(role.get("role", "") for role in getattr(agent, "current_institution_roles", [])[:2] if role.get("role"))
-        narrative_parts = [
-            summary,
-            result.get("self_reflection", ""),
-            f"My place lately: {recent_roles}." if recent_roles else "",
-        ]
-        agent.identity.self_narrative = " ".join(part for part in narrative_parts if part).strip()
+
+    # Identity crystallization
+    identity_update = result.get("identity_update")
+    if identity_update and isinstance(identity_update, str) and identity_update != "null":
+        if not agent.self_concept:
+            agent.bump_identity(identity_update)
+    relationships = getattr(agent, "relationships", {})
+    num_friends = sum(1 for rel in relationships.values() if rel.get("trust", 0.0) > 0.62)
+    has_home = bool(agent._find_home())
+    competence = min(1.0, max(
+        (entry.get("skill_level", 0.0) for entry in agent.skill_memory.activities.values()),
+        default=0.0,
+    ))
+    agent.identity.update_belonging(has_home, num_friends, day + 1)
+    agent.identity.update_purpose(
+        has_role=bool(agent.self_concept or agent.identity.role_in_community),
+        has_goals=bool(agent.active_goals or agent.long_term_goals),
+        competence_satisfaction=competence,
+    )
+    agent.identity.satisfaction_with_role = round(min(1.0, 0.4 + competence * 0.4), 2)
+    agent.identity.satisfaction_with_relationships = round(min(1.0, 0.3 + num_friends * 0.15), 2)
+    agent.identity.satisfaction_with_community = round((agent.identity.sense_of_belonging + agent.identity.satisfaction_with_relationships) / 2, 2)
+    agent.identity.life_satisfaction = round(
+        (
+            agent.identity.sense_of_belonging
+            + agent.identity.sense_of_purpose
+            + agent.identity.satisfaction_with_role
+            + agent.identity.satisfaction_with_relationships
+        ) / 4,
+        2,
+    )
+    agent.identity.detect_tensions(agent.belief_system.beliefs, relationships, todays)
+    agent.identity.generate_goals_from_tensions()
+    agent.identity.update_self_narrative(todays, agent.belief_system.beliefs)
+    if identity_update and isinstance(identity_update, str) and identity_update != "null":
+        agent.identity.self_narrative = f"{agent.identity.self_narrative} {identity_update}".strip()[:320]
+    agent.long_term_goals = _derive_long_term_goals(agent)
+    agent.active_goals = [
+        goal for goal in agent.active_goals
+        if goal.get("status") == "active" and goal.get("kind") == "daily_focus"
+    ]
+    for goal in agent.long_term_goals[:3]:
+        if not any(existing.get("text") == goal.get("text") for existing in agent.active_goals):
+            agent.active_goals.append({
+                "text": goal.get("text", ""),
+                "status": "active",
+                "source": goal.get("source", "identity_tension"),
+                "priority": goal.get("priority", 0.6),
+                "created_tick": tick,
+                "kind": "long_arc",
+            })
+    agent.active_goals = agent.active_goals[:6]
 
     tomorrow = result.get("tomorrow_intention")
     if tomorrow and isinstance(tomorrow, str) and tomorrow != "null":
-        agent.active_intentions.insert(0, {
-            "goal": tomorrow,
-            "why": "This is what keeps echoing at the end of the day.",
-            "urgency": 0.58,
-            "source": "evening_reflection",
-            "target_location": agent.current_location,
-            "next_step": tomorrow,
-            "status": "candidate",
-        })
-        agent.active_intentions = agent.active_intentions[:8]
+        agent.add_intention(
+            tomorrow,
+            "This is what keeps echoing at the end of the day.",
+            0.58,
+            "evening_reflection",
+            target_location=agent.current_location,
+            next_step=tomorrow,
+            status="candidate",
+            created_tick=tick,
+            expires_after_ticks=220,
+            refresh_on_relevance=True,
+        )
+    elif agent.long_term_goals:
+        top_goal = agent.long_term_goals[0]
+        agent.add_intention(
+            f"Make progress on {top_goal.get('text', 'what matters to me')}",
+            top_goal.get("why", "I want tomorrow to move me forward."),
+            min(0.75, float(top_goal.get("priority", 0.6))),
+            "long_term_goal_followthrough",
+            target_location=agent.current_location,
+            next_step=top_goal.get("text", ""),
+            status="candidate",
+            created_tick=tick,
+            expires_after_ticks=220,
+            refresh_on_relevance=True,
+        )
+
+    # World lessons become beliefs
+    for lesson in result.get("world_lessons", []):
+        if lesson and isinstance(lesson, str):
+            agent.belief_system.add(
+                lesson, "world_knowledge", 0.6, tick=tick,
+            )
+
+    # Tomorrow's caution becomes background worry
+    tomorrow_avoid = result.get("tomorrow_avoid")
+    if tomorrow_avoid and isinstance(tomorrow_avoid, str) and tomorrow_avoid != "null":
+        if not agent.working_memory.background_worry:
+            agent.working_memory.set_worry(tomorrow_avoid)
+
+    agent.prune_expired_intentions(tick)
 
     return result

@@ -4,7 +4,7 @@ import { AGENT_COLORS } from "../../utils/formatting";
 import MindTab from "./MindTab";
 import RelationshipsTab from "./RelationshipsTab";
 
-const TABS = ["Status", "Mind", "Relations", "Skills"] as const;
+const TABS = ["Status", "Mind", "Relations", "Skills", "Knowledge", "Inventory"] as const;
 type Tab = (typeof TABS)[number];
 
 interface Props {
@@ -106,12 +106,12 @@ export default function InspectorPanel({ onInspect }: Props) {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-800">
+      <div className="flex border-b border-gray-800 overflow-x-auto">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-1.5 text-[10px] uppercase tracking-wider ${
+            className={`flex-shrink-0 px-2 py-1.5 text-[9px] uppercase tracking-wider ${
               tab === t
                 ? "text-amber-400 border-b-2 border-amber-400"
                 : "text-gray-500 hover:text-gray-300"
@@ -129,7 +129,9 @@ export default function InspectorPanel({ onInspect }: Props) {
         {tab === "Relations" && (
           <RelationshipsTab agent={agent} detail={detail} onInspect={onInspect} />
         )}
-        {tab === "Skills" && <EconContent agent={agent} detail={detail} />}
+        {tab === "Skills" && <SkillsContent agent={agent} detail={detail} />}
+        {tab === "Knowledge" && <KnowledgeContent agent={agent} detail={detail} />}
+        {tab === "Inventory" && <InventoryContent agent={agent} detail={detail} />}
       </div>
     </div>
   );
@@ -189,6 +191,28 @@ function StatusContent({ agent, detail }: { agent: any; detail: any }) {
         <BarRow label="Mood" value={agent.state.mood} color="bg-blue-500" />
       </div>
 
+      {/* Drives */}
+      {agent.drives && (
+        <div className="pt-2 border-t border-gray-800">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Drives</div>
+          <div className="space-y-0.5">
+            {Object.entries(agent.drives).filter(([k]) => k !== "dominant").map(([name, val]: [string, any]) => {
+              if (typeof val !== "number") return null;
+              const driveColor = val > 0.7 ? "bg-red-500" : val > 0.4 ? "bg-yellow-500" : "bg-green-500";
+              return (
+                <div key={name} className="flex items-center gap-1">
+                  <span className="text-[9px] text-gray-600 w-16 capitalize">{name}</span>
+                  <div className="flex-1 bg-gray-800 rounded-full h-1">
+                    <div className={`${driveColor} h-1 rounded-full`} style={{ width: `${val * 100}%` }} />
+                  </div>
+                  <span className="text-[9px] text-gray-600 w-6 text-right">{Math.round(val * 100)}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {detail?.backstory && (
         <div className="pt-2 border-t border-gray-800">
           <div className="text-[10px] text-gray-500 uppercase mb-1">Backstory</div>
@@ -242,11 +266,13 @@ function StatusContent({ agent, detail }: { agent: any; detail: any }) {
   );
 }
 
-function EconContent({ agent, detail }: { agent: any; detail: any }) {
-  const inventory = (agent as any)?.inventory || detail?.inventory || [];
+function SkillsContent({ agent, detail }: { agent: any; detail: any }) {
   const skills = detail?.skills || {};
   const physicalTraits = detail?.physicalTraits || {};
-  const currentCommitment = detail?.currentCommitment;
+  const worldObjects = useSimulationStore((s) => s.worldObjects);
+  const createdObjects = worldObjects.filter(
+    (o) => o.created_by === agent.name || o.created_by === agent.id
+  );
 
   return (
     <div className="space-y-3 text-xs">
@@ -282,7 +308,9 @@ function EconContent({ agent, detail }: { agent: any; detail: any }) {
                   <div className="w-16 bg-gray-800 rounded-full h-1.5">
                     <div className="bg-amber-500 h-1.5 rounded-full" style={{ width: `${(data.skill_level || 0) * 100}%` }} />
                   </div>
-                  <span className="text-[9px] text-gray-500">{data.attempts || 0}x</span>
+                  <span className="text-[9px] text-gray-500">
+                    {data.attempts || 0}a / {data.successes || 0}s
+                  </span>
                 </div>
               </div>
             ))}
@@ -290,32 +318,29 @@ function EconContent({ agent, detail }: { agent: any; detail: any }) {
         )}
       </div>
 
-      {/* Inventory */}
+      {/* Objects created by this agent */}
       <div>
         <div className="text-[10px] text-gray-500 uppercase mb-1">
-          Inventory ({inventory.length})
+          Creations ({createdObjects.length})
         </div>
-        {inventory.length === 0 ? (
-          <p className="text-gray-600 italic">Empty hands</p>
+        {createdObjects.length === 0 ? (
+          <p className="text-gray-600 italic">No objects created yet</p>
         ) : (
           <div className="space-y-0.5">
-            {inventory.map((item: any, i: number) => (
-              <div key={i} className="text-gray-400">
-                {item.name || item} {item.quantity ? `(${item.quantity})` : ""}
+            {createdObjects.map((obj) => (
+              <div key={obj.id} className="p-1.5 bg-gray-800/30 rounded text-[10px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-300">{obj.name}</span>
+                  <span className="text-[9px] text-gray-600 capitalize">{obj.category}</span>
+                </div>
+                {obj.description && (
+                  <div className="text-gray-500 mt-0.5">{obj.description}</div>
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
-
-      {currentCommitment && (
-        <div>
-          <div className="text-[10px] text-gray-500 uppercase mb-1">Current Commitment</div>
-          <div className="p-2 bg-cyan-900/15 border border-cyan-900/30 rounded text-gray-300">
-            {(currentCommitment.description || currentCommitment.what) ?? "Following through on a plan"}
-          </div>
-        </div>
-      )}
 
       {detail?.schedule && detail.schedule.length > 0 && (
         <div>
@@ -326,6 +351,194 @@ function EconContent({ agent, detail }: { agent: any; detail: any }) {
                 <div>{step.label || `${String(step.hour).padStart(2, "0")}:00 ${step.activity}`}</div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KnowledgeContent({ agent, detail }: { agent: any; detail: any }) {
+  const worldKnowledge = detail?.worldKnowledge || {};
+  const beliefs = detail?.beliefs || [];
+  const mentalModels = detail?.mentalModels || {};
+
+  return (
+    <div className="space-y-3 text-xs">
+      {/* Beliefs with confidence */}
+      {beliefs.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Beliefs ({beliefs.length})
+          </div>
+          <div className="space-y-0.5">
+            {beliefs.slice(0, 12).map((b: any, i: number) => (
+              <div key={i} className="text-[10px] text-gray-400 p-1.5 bg-gray-800/20 rounded flex items-start gap-1">
+                <div className="flex-1">{b.content}</div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <div className="w-8 bg-gray-800 rounded-full h-1">
+                    <div
+                      className={`h-1 rounded-full ${b.confidence > 0.7 ? "bg-green-500" : b.confidence > 0.4 ? "bg-yellow-500" : "bg-gray-500"}`}
+                      style={{ width: `${(b.confidence || 0) * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-gray-600 text-[9px]">{Math.round((b.confidence || 0) * 100)}%</span>
+                  {b.questioned && <span className="text-amber-400">?</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Discovered Locations */}
+      {worldKnowledge.locations && Object.keys(worldKnowledge.locations).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Discovered Places ({Object.keys(worldKnowledge.locations).length})
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {Object.entries(worldKnowledge.locations).map(([loc, data]: [string, any]) => (
+              <span key={loc} className="text-[9px] px-1.5 py-0.5 bg-gray-800 rounded text-gray-400" title={data?.notes || ""}>
+                {loc.replace(/_/g, " ")}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* World knowledge entries (other than locations) */}
+      {Object.keys(worldKnowledge).filter(k => k !== "locations").length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">World Knowledge</div>
+          <div className="space-y-1">
+            {Object.entries(worldKnowledge)
+              .filter(([k]) => k !== "locations")
+              .slice(0, 10)
+              .map(([key, val]: [string, any]) => (
+                <div key={key} className="p-1.5 bg-gray-800/20 rounded text-[10px]">
+                  <span className="text-gray-400 capitalize">{key.replace(/_/g, " ")}: </span>
+                  <span className="text-gray-500">
+                    {typeof val === "object" ? JSON.stringify(val).slice(0, 80) : String(val)}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Mental Models */}
+      {Object.keys(mentalModels).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Mental Models ({Object.keys(mentalModels).length})
+          </div>
+          <div className="space-y-1">
+            {Object.entries(mentalModels).slice(0, 6).map(([name, model]: [string, any]) => (
+              <div key={name} className="text-[10px] p-1.5 bg-gray-800/30 rounded">
+                <span className="text-gray-300">{name}</span>
+                <div className="flex gap-2 mt-0.5 text-[9px] text-gray-600">
+                  {model.trust !== undefined && <span>trust: {model.trust?.toFixed?.(1) ?? model.trust}</span>}
+                  {model.reliability !== undefined && <span>rely: {model.reliability?.toFixed?.(1) ?? model.reliability}</span>}
+                  {model.emotional_safety !== undefined && <span>safe: {model.emotional_safety?.toFixed?.(1) ?? model.emotional_safety}</span>}
+                </div>
+                {model.personality && <div className="text-[9px] text-gray-500 mt-0.5">{model.personality.slice(0, 60)}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Proposal Stances */}
+      {detail?.proposalStances && Object.keys(detail.proposalStances).length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Proposal Stances</div>
+          <div className="space-y-1">
+            {Object.entries(detail.proposalStances).slice(0, 5).map(([proposalId, stance]: [string, any]) => (
+              <div key={proposalId} className="p-1.5 bg-gray-800/20 border border-gray-800 rounded text-[10px]">
+                <div className="text-gray-300">{proposalId}</div>
+                <div className="text-gray-500">{stance.stance} | legitimacy {stance.legitimacy}</div>
+                {stance.reason && <div className="text-gray-600">{stance.reason}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InventoryContent({ agent, detail }: { agent: any; detail: any }) {
+  const inventory = (agent as any)?.inventory || detail?.inventory || [];
+  const worldObjects = useSimulationStore((s) => s.worldObjects);
+  const ownedObjects = worldObjects.filter(
+    (o) => o.owner === agent.name || o.owner === agent.id
+  );
+  const currentCommitment = detail?.currentCommitment;
+
+  return (
+    <div className="space-y-3 text-xs">
+      {/* Inventory items */}
+      <div>
+        <div className="text-[10px] text-gray-500 uppercase mb-1">
+          Inventory ({inventory.length})
+        </div>
+        {inventory.length === 0 ? (
+          <p className="text-gray-600 italic">Empty hands</p>
+        ) : (
+          <div className="space-y-0.5">
+            {inventory.map((item: any, i: number) => (
+              <div key={i} className="text-gray-400 p-1 bg-gray-800/20 rounded flex items-center justify-between">
+                <span>{item.name || item}</span>
+                {item.quantity && <span className="text-gray-600">x{item.quantity}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* World objects owned */}
+      {ownedObjects.length > 0 && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">
+            Owned Objects ({ownedObjects.length})
+          </div>
+          <div className="space-y-0.5">
+            {ownedObjects.map((obj) => (
+              <div key={obj.id} className="p-1.5 bg-gray-800/20 rounded text-[10px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-300">{obj.name}</span>
+                  <span className="text-[9px] text-gray-600 capitalize">{obj.category} / {obj.size}</span>
+                </div>
+                {obj.description && <div className="text-gray-500 mt-0.5">{obj.description}</div>}
+                {obj.effects && Object.keys(obj.effects).length > 0 && (
+                  <div className="flex gap-1 mt-0.5">
+                    {Object.entries(obj.effects).map(([k, v]) => (
+                      <span key={k} className={`text-[9px] px-1 rounded ${v > 0 ? "bg-green-900/30 text-green-400" : "bg-red-900/30 text-red-400"}`}>
+                        {k}: {v > 0 ? "+" : ""}{v}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Wealth */}
+      <div className="p-2 bg-amber-900/10 border border-amber-900/30 rounded">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Coins</span>
+          <span className="text-amber-400 font-medium">{agent.state.wealth}</span>
+        </div>
+      </div>
+
+      {currentCommitment && (
+        <div>
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Current Commitment</div>
+          <div className="p-2 bg-cyan-900/15 border border-cyan-900/30 rounded text-gray-300">
+            {(currentCommitment.description || currentCommitment.what) ?? "Following through on a plan"}
           </div>
         </div>
       )}

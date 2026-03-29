@@ -5,13 +5,13 @@ import { AGENT_COLORS } from "../../utils/formatting";
 const TABS = ["overview", "agents", "timeline", "social", "constitution", "resources"] as const;
 type Tab = (typeof TABS)[number];
 
-const FEED_FILTERS = ["All", "Conversations", "Thoughts", "Transactions", "Events", "Gossip"] as const;
+const FEED_FILTERS = ["All", "Conversations", "Thoughts", "Actions", "Events", "Gossip"] as const;
 type FeedFilter = (typeof FEED_FILTERS)[number];
 
 const FEED_TYPE_MAP: Record<string, FeedFilter> = {
   agent_speak: "Conversations",
   agent_thought: "Thoughts",
-  transaction: "Transactions",
+  transaction: "Actions",
   system_event: "Events",
   gossip: "Gossip",
 };
@@ -125,7 +125,6 @@ export default function Dashboard({ onSend, onClose }: Props) {
   }, [onSend]);
 
   const agentDetails = dashboardData?.agents || [];
-  const economy = dashboardData?.economy || {};
   const townStats = dashboardData?.townStats || {};
   const debugEvents = dashboardData?.debugEvents || [];
   const quietFeed = useMemo(
@@ -224,7 +223,6 @@ export default function Dashboard({ onSend, onClose }: Props) {
         {tab === "overview" && (
           <OverviewTab
             stats={townStats}
-            economy={economy}
             debugEvents={debugEvents}
             time={time}
             worldSummary={dashboardData?.worldSummary || ""}
@@ -234,7 +232,6 @@ export default function Dashboard({ onSend, onClose }: Props) {
             activeProposals={dashboardData?.activeProposals || []}
             meetings={dashboardData?.meetings || []}
             projects={dashboardData?.projects || []}
-            trades={dashboardData?.trades || []}
             rawLogOpen={rawLogOpen}
             onToggleRawLog={() => setRawLogOpen((v) => !v)}
           />
@@ -265,7 +262,7 @@ export default function Dashboard({ onSend, onClose }: Props) {
   );
 }
 
-function OverviewTab({ stats, debugEvents, time, worldSummary, storyHighlights = [], currentSituations = [], collapsedFeed = [], activeProposals = [], meetings = [], projects = [], trades = [], rawLogOpen, onToggleRawLog }: any) {
+function OverviewTab({ stats, debugEvents, time, worldSummary, storyHighlights = [], currentSituations = [], collapsedFeed = [], activeProposals = [], meetings = [], projects = [], rawLogOpen, onToggleRawLog }: any) {
   return (
     <div className="space-y-6">
       {worldSummary && (
@@ -389,8 +386,8 @@ function OverviewTab({ stats, debugEvents, time, worldSummary, storyHighlights =
           <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
             <h3 className="text-xs text-gray-500 uppercase mb-3">Notable Agents</h3>
             <div className="space-y-2 text-xs">
-              {stats.richest && <NotableLine emoji={"$"} label="Richest" name={stats.richest.name} detail={`${stats.richest.wealth}c`} />}
-              {stats.poorest && <NotableLine emoji={"!"} label="Poorest" name={stats.poorest.name} detail={`${stats.poorest.wealth}c`} />}
+              {stats.richest && <NotableLine emoji={"$"} label="Most Resourced" name={stats.richest.name} detail={`${stats.richest.wealth}`} />}
+              {stats.poorest && <NotableLine emoji={"!"} label="Least Resourced" name={stats.poorest.name} detail={`${stats.poorest.wealth}`} />}
               {stats.happiest && <NotableLine emoji={"+"} label="Happiest" name={stats.happiest.name} detail={`${Math.round(stats.happiest.mood * 100)}%`} />}
               {stats.saddest && <NotableLine emoji={"-"} label="Saddest" name={stats.saddest.name} detail={`${Math.round(stats.saddest.mood * 100)}%`} />}
               {stats.mostConnected && <NotableLine emoji={"*"} label="Most Connected" name={stats.mostConnected.name} detail={`${stats.mostConnected.connections} relationships`} />}
@@ -413,18 +410,10 @@ function OverviewTab({ stats, debugEvents, time, worldSummary, storyHighlights =
           </div>
 
           <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-            <h3 className="text-xs text-gray-500 uppercase mb-3">Recent Barter ({trades.length || 0})</h3>
-            {trades.length === 0 ? (
-              <p className="text-xs text-gray-600 italic">No trades yet.</p>
-            ) : (
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {[...trades].reverse().slice(0, 6).map((trade: any, i: number) => (
-                  <div key={i} className="text-xs text-gray-400">
-                    <span className="text-amber-400">{trade.from_agent}</span> traded with <span className="text-cyan-300">{trade.to_agent}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+            <h3 className="text-xs text-gray-500 uppercase mb-3">Emergent Patterns</h3>
+            <p className="text-xs text-gray-600">
+              Watch the Constitution and Timeline tabs for markets, leadership, rituals, and other systems if they emerge.
+            </p>
           </div>
         </div>
       </div>
@@ -531,7 +520,7 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
           const hunger = Math.round((a.state?.hunger || 0) * 100);
           const memCount = a.memories?.length || 0;
           const relCount = a.relationships ? Object.keys(a.relationships).length : 0;
-          const txnCount = a.transactions?.length || 0;
+          const commitmentCount = a.socialCommitments?.length || 0;
 
           return (
             <div key={a.id} className={`bg-gray-900 rounded-lg border ${isExp ? "border-amber-700 col-span-3" : "border-gray-800 hover:border-gray-700"} cursor-pointer`} onClick={() => onToggle(a.id)}>
@@ -545,7 +534,7 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
                     <div className="text-[10px] text-gray-500">{a.age}yo {a.job}</div>
                   </div>
                   <div className="text-right text-[10px]">
-                    <div className="text-amber-400 font-medium">{a.state?.wealth || 0}c</div>
+                    <div className="text-amber-400 font-medium">{a.state?.wealth || 0}</div>
                     <div className="text-gray-600">{a.currentAction}</div>
                   </div>
                 </div>
@@ -559,7 +548,7 @@ function AgentsTab({ agents, expanded, onToggle, sort, onSort }: { agents: any[]
                 <div className="flex gap-3 mt-2 text-[9px] text-gray-500">
                   <span>{memCount} memories</span>
                   <span>{relCount} relationships</span>
-                  <span>{txnCount} transactions</span>
+                  <span>{commitmentCount} commitments</span>
                   <span className="ml-auto text-gray-600">{a.emotion}</span>
                 </div>
 
@@ -739,33 +728,35 @@ function SocialTab({ agents }: { agents: any[] }) {
 }
 
 function ConstitutionTab({ constitution }: { constitution: any }) {
-  const economic = constitution.economic || {};
-  const governance = constitution.governance || {};
   const norms = constitution.norms || [];
   const institutions = constitution.institutions || [];
+  const patterns = constitution.patterns || [];
   const history = constitution.history || [];
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-2">Governance</h3>
-          <div className="text-sm text-gray-300">{governance.system || "No system established"}</div>
-          {governance.informal_leader && <div className="text-xs text-amber-400 mt-1">Informal leader: {governance.informal_leader}</div>}
-          {governance.leaders?.length > 0 && <div className="text-xs text-gray-400 mt-1">Leaders: {governance.leaders.join(", ")}</div>}
-          {governance.leadership_scores && (
-            <div className="mt-1 text-[10px] text-gray-500">
-              Influence: {Object.entries(governance.leadership_scores).map(([name, score]) => `${name} (${score})`).join(", ")}
-            </div>
-          )}
-          {governance.laws?.length > 0 && <div className="mt-2"><div className="text-[10px] text-gray-600 uppercase">Laws</div>{governance.laws.map((l: string, i: number) => <div key={i} className="text-xs text-gray-400">- {l}</div>)}</div>}
-        </div>
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <h3 className="text-xs text-gray-500 uppercase mb-2">Emergent Systems</h3>
+        <p className="text-sm text-gray-300">
+          Leadership, markets, rituals, and other institutions only appear here once the simulation actually produces them.
+        </p>
+      </div>
 
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h3 className="text-xs text-gray-500 uppercase mb-2">Economy</h3>
-          <div className="text-sm text-gray-300">Currency: {economic.currency || "None (barter only)"}</div>
-          {economic.trade_rules?.length > 0 && <div className="mt-1 text-xs text-gray-400">Trade rules: {economic.trade_rules.join("; ")}</div>}
-        </div>
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <h3 className="text-xs text-gray-500 uppercase mb-2">Detected Patterns ({patterns.length})</h3>
+        {patterns.length === 0 ? <p className="text-xs text-gray-600 italic">No stable patterns detected yet</p> : (
+          <div className="space-y-2">
+            {patterns.map((pattern: any, i: number) => (
+              <div key={i} className="text-xs text-gray-300 border border-gray-800 rounded p-2">
+                <div>{pattern.name}</div>
+                <div className="text-[10px] text-gray-500 mt-1">
+                  {pattern.type} | day {pattern.emerged_on}
+                </div>
+                {pattern.description && <div className="text-[10px] text-gray-500 mt-1">{pattern.description}</div>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">

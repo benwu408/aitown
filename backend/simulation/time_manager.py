@@ -77,6 +77,22 @@ class TimeManager:
         display_h = h % 12 or 12
         return f"{display_h}:{m:02d} {ampm}"
 
+    def get_weather_modifier(self, action_type: str) -> float:
+        from simulation.world import WEATHER_ACTION_MODIFIERS
+        mods = WEATHER_ACTION_MODIFIERS.get(self.weather, {})
+        return mods.get(action_type, 1.0)
+
+    def get_season_resource_modifier(self, resource: str) -> float:
+        from simulation.world import SEASON_RESOURCE_MODIFIERS
+        mods = SEASON_RESOURCE_MODIFIERS.get(self.season, {})
+        return mods.get(resource, 1.0)
+
+    def get_energy_drain_modifier(self) -> float:
+        from simulation.world import WEATHER_ENERGY_DRAIN, SEASON_ENERGY_DRAIN
+        weather_mod = WEATHER_ENERGY_DRAIN.get(self.weather, 1.0)
+        season_mod = SEASON_ENERGY_DRAIN.get(self.season, 1.0)
+        return weather_mod * season_mod
+
     def to_dict(self) -> dict:
         return {
             "tick_in_day": self.tick_in_day,

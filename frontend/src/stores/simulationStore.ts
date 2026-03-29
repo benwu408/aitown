@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { AgentData, AgentDetail, GameEvent, SimTime } from "../types/agent";
+import { AgentData, AgentDetail, GameEvent, SimTime, WorldObject, ActionResultEvent, InnovationEvent, PatternEvent, TimelineEvent } from "../types/agent";
 
 interface FeedEntry {
   id: number;
@@ -26,7 +26,12 @@ interface SimulationState {
   storyHighlights: any[];
   buildings: any[];
   tileGrid: any[][] | null;
-  speechBubbles: Array<{ agentId: string; text: string; expires: number }>;
+  speechBubbles: Array<{ agentId: string; text: string; expires: number; conversationId?: string }>;
+  worldObjects: WorldObject[];
+  innovations: InnovationEvent[];
+  patterns: PatternEvent[];
+  timelineEvents: TimelineEvent[];
+  actionResults: ActionResultEvent[];
 
   setConnected: (v: boolean) => void;
   updateFromTick: (data: {
@@ -41,6 +46,10 @@ interface SimulationState {
     agents: AgentData[];
     weather: string;
     speed: number;
+    worldObjects?: WorldObject[];
+    innovations?: InnovationEvent[];
+    patterns?: PatternEvent[];
+    timelineEvents?: TimelineEvent[];
   }) => void;
   selectAgent: (id: string | null) => void;
   setAgentDetail: (detail: AgentDetail | null) => void;
@@ -48,6 +57,13 @@ interface SimulationState {
   setDashboardData: (data: any) => void;
   setFollowAgent: (id: string | null) => void;
   setAutobiography: (data: { agentId: string; text: string } | null) => void;
+  addWorldObjects: (objects: WorldObject[]) => void;
+  removeWorldObjects: (ids: string[]) => void;
+  updateWorldObject: (obj: Partial<WorldObject> & { id: string }) => void;
+  addInnovation: (innovation: InnovationEvent) => void;
+  addPattern: (pattern: PatternEvent) => void;
+  addTimelineEvent: (event: TimelineEvent) => void;
+  addActionResult: (result: ActionResultEvent) => void;
 }
 
 let feedCounter = 0;
@@ -68,6 +84,11 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   buildings: [],
   tileGrid: null,
   speechBubbles: [],
+  worldObjects: [],
+  innovations: [],
+  patterns: [],
+  timelineEvents: [],
+  actionResults: [],
 
   setConnected: (v) => set({ connected: v }),
 
@@ -83,6 +104,10 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       agents,
       buildings: (data as any).buildings || [],
       tileGrid: (data as any).tileGrid || null,
+      worldObjects: (data as any).worldObjects || [],
+      innovations: (data as any).innovations || [],
+      patterns: (data as any).patterns || [],
+      timelineEvents: (data as any).timelineEvents || [],
     });
   },
 
@@ -107,7 +132,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
 
     // Generate feed entries from events
     const newFeedEntries: FeedEntry[] = [];
-    const newSpeechBubbles: Array<{ agentId: string; text: string; expires: number }> = [];
+    const newSpeechBubbles: Array<{ agentId: string; text: string; expires: number; conversationId?: string }> = [];
     for (const event of data.events) {
       const agent = agents[event.agentId || ""];
       let text = "";
@@ -185,7 +210,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
         feed: [...newFeedEntries, ...state.feed].slice(0, 200),
         speechBubbles: (() => {
           // Merge: new bubbles replace existing ones from the same agent
-          const merged = new Map<string, { agentId: string; text: string; expires: number }>();
+          const merged = new Map<string, { agentId: string; text: string; expires: number; conversationId?: string }>();
           for (const b of state.speechBubbles) {
             if (b.expires > Date.now()) merged.set(b.agentId, b);
           }
@@ -195,6 +220,10 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
           return [...merged.values()].slice(0, 10);
         })(),
         storyHighlights: (data as any).storyHighlights || state.storyHighlights,
+        worldObjects: (data as any).worldObjects || state.worldObjects,
+        innovations: (data as any).innovations || state.innovations,
+        patterns: (data as any).patterns || state.patterns,
+        timelineEvents: (data as any).timelineEvents || state.timelineEvents,
         ...(tileGrid ? { tileGrid } : {}),
         ...(fullBuildings ? { buildings: fullBuildings } : {}),
       };
@@ -207,6 +236,52 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   setDashboardData: (data: any) => set({ dashboardData: data, storyHighlights: data?.storyHighlights || [] }),
   setFollowAgent: (id) => set({ followAgentId: id }),
   setAutobiography: (data) => set({ autobiography: data }),
+
+  addWorldObjects: (objects) => set((state) => {
+    const merged = new Map(state.worldObjects.map((object) => [object.id, object]));
+    for (const object of objects) {
+      merged.set(object.id, object);
+    }
+    return { worldObjects: [...merged.values()] };
+  }),
+  removeWorldObjects: (ids) => set((state) => ({
+    worldObjects: state.worldObjects.filter((o) => !ids.includes(o.id)),
+  })),
+  updateWorldObject: (obj) => set((state) => ({
+    worldObjects: state.worldObjects.map((o) =>
+      o.id === obj.id ? { ...o, ...obj } : o
+    ),
+  })),
+  addInnovation: (innovation) => set((state) => {
+    const existing = state.innovations.findIndex((i) => i.id === innovation.id);
+    if (existing >= 0) {
+      const updated = [...state.innovations];
+      updated[existing] = innovation;
+      return { innovations: updated };
+    }
+    return { innovations: [...state.innovations, innovation] };
+  }),
+  addPattern: (pattern) => set((state) => {
+    const existing = state.patterns.findIndex((p) => p.name === pattern.name && p.emerged_on === pattern.emerged_on);
+    if (existing >= 0) {
+      const updated = [...state.patterns];
+      updated[existing] = pattern;
+      return { patterns: updated };
+    }
+    return { patterns: [...state.patterns, pattern].slice(-100) };
+  }),
+  addTimelineEvent: (event) => set((state) => {
+    const existing = state.timelineEvents.findIndex((entry) => entry.tick === event.tick && entry.type === event.type && entry.title === event.title);
+    if (existing >= 0) {
+      const updated = [...state.timelineEvents];
+      updated[existing] = event;
+      return { timelineEvents: updated };
+    }
+    return { timelineEvents: [...state.timelineEvents, event].slice(-200) };
+  }),
+  addActionResult: (result) => set((state) => ({
+    actionResults: [result, ...state.actionResults].slice(0, 100),
+  })),
 }));
 
 function formatLocation(id: string): string {

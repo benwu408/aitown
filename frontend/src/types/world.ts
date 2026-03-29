@@ -15,8 +15,6 @@ export type BuildingType =
   | "bakery"
   | "workshop"
   | "tavern"
-  | "school"
-  | "church"
   | "house_1"
   | "house_2"
   | "house_3"
@@ -24,7 +22,10 @@ export type BuildingType =
   | "house_5"
   | "house_6"
   | "park"
-  | "pond";
+  | "pond"
+  | "built_structure"
+  | "project"
+  | string;
 
 export interface Tile {
   col: number;
@@ -51,3 +52,7 @@ export interface WorldMap {
   tiles: Tile[][];
   buildings: Building[];
 }
+
+export type WorldObjectCategory = 'tool' | 'structure' | 'container' | 'food' | 'medicine' | 'art' | 'clothing' | 'document' | 'marker' | 'furniture' | 'mechanism' | 'other';
+
+export type WorldObjectSize = 'tiny' | 'small' | 'medium' | 'large' | 'structure';

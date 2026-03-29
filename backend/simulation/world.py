@@ -1,4 +1,4 @@
-"""Open-ended world — zero-building wilderness with emergent settlement growth."""
+"""Open-ended world -- zero-building wilderness with emergent settlement growth."""
 
 import heapq
 import logging
@@ -7,6 +7,23 @@ import random
 logger = logging.getLogger("agentica.world")
 
 MAP_SIZE = 40
+
+SEASON_RESOURCE_MODIFIERS = {
+    "spring": {"wild_plants": 1.3, "wild_berries": 1.1, "fish": 1.0, "wood": 1.0},
+    "summer": {"wild_plants": 1.0, "wild_berries": 1.4, "fish": 1.2, "wood": 1.0},
+    "autumn": {"wild_plants": 0.7, "wild_berries": 0.8, "fish": 0.8, "wood": 1.2},
+    "winter": {"wild_plants": 0.3, "wild_berries": 0.2, "fish": 0.5, "wood": 0.8},
+}
+
+WEATHER_ACTION_MODIFIERS = {
+    "clear": {"gathering": 1.0, "building": 1.0, "fishing": 1.0, "trading": 1.0},
+    "cloudy": {"gathering": 0.95, "building": 0.95, "fishing": 1.0, "trading": 1.0},
+    "rain": {"gathering": 0.7, "building": 0.5, "fishing": 0.8, "trading": 0.8},
+    "storm": {"gathering": 0.3, "building": 0.2, "fishing": 0.3, "trading": 0.5},
+}
+
+WEATHER_ENERGY_DRAIN = {"clear": 1.0, "cloudy": 1.0, "rain": 1.15, "storm": 1.3}
+SEASON_ENERGY_DRAIN = {"spring": 1.0, "summer": 1.1, "autumn": 1.0, "winter": 1.3}
 
 LOCATIONS = {
     "clearing": {
@@ -147,47 +164,38 @@ class WorldConstitution:
     """Living rules of the simulation. Starts blank."""
 
     def __init__(self):
-        self.economic_rules = {"currency": None, "trade_rules": [], "property_rules": [], "taxation": None}
-        self.governance_rules = {"system": None, "leaders": [], "laws": [], "enforcement_mechanism": None}
         self.social_norms: list[dict] = []
         self.institutions: list[dict] = []
+        self.detected_patterns: list[dict] = []
         self.change_history: list[dict] = []
 
     def summary(self) -> str:
         parts = []
-        if self.economic_rules["currency"]:
-            parts.append(f"Currency: {self.economic_rules['currency']}")
-        if self.governance_rules.get("informal_leader"):
-            parts.append(f"Leader: {self.governance_rules['informal_leader']}")
-        elif self.governance_rules["leaders"]:
-            parts.append(f"Leaders: {', '.join(self.governance_rules['leaders'])}")
-        if self.governance_rules["laws"]:
-            parts.append(f"Laws: {'; '.join(self.governance_rules['laws'][:3])}")
         if self.social_norms:
             norm_labels = [n["text"] if isinstance(n, dict) else str(n) for n in self.social_norms[:3]]
             parts.append(f"Norms: {'; '.join(norm_labels)}")
         if self.institutions:
             parts.append(f"Institutions: {', '.join(i['name'] for i in self.institutions[:3])}")
+        if self.detected_patterns:
+            pattern_labels = [p.get("name", p.get("text", "pattern")) for p in self.detected_patterns[:3]]
+            parts.append(f"Patterns: {', '.join(pattern_labels)}")
         return "\n".join(parts) if parts else "No rules established yet. This place is still completely unsettled."
 
     def to_dict(self) -> dict:
         return {
-            "economic": self.economic_rules,
-            "governance": self.governance_rules,
             "norms": self.social_norms,
             "institutions": self.institutions,
+            "patterns": self.detected_patterns,
             "history": self.change_history[-40:],
         }
 
     def load_from_dict(self, data: dict):
-        if data.get("economic"):
-            self.economic_rules = data["economic"]
-        if data.get("governance"):
-            self.governance_rules = data["governance"]
         if data.get("norms"):
             self.social_norms = data["norms"]
         if data.get("institutions"):
             self.institutions = data["institutions"]
+        if data.get("patterns"):
+            self.detected_patterns = data["patterns"]
         if data.get("history"):
             self.change_history = data["history"]
 
@@ -202,16 +210,23 @@ class World:
         self.resources = {k: dict(v) for k, v in RESOURCES.items()}
         self.constitution = WorldConstitution()
         self.created_objects: list[dict] = []
-        self.trades: list[dict] = []
         self.active_proposals: list[dict] = []
         self.meetings: list[dict] = []
         self.coalitions: list[dict] = []
         self.norm_violations: list[dict] = []
         self.projects: list[dict] = []
-        self.shared_pool: dict[str, int] = {}  # Communal resource pool (taxes, donations)
         self.tile_resource_state: dict[str, dict[str, int]] = {}
         self.tiles: list[list[dict]] = []
         self._path_cache: dict = {}
+
+        # Open-ended action system state
+        self.world_objects: dict = {}  # id -> WorldObject
+        self.known_object_types: set = set()
+        self.latent_possibilities: list[str] = []
+        self.innovation_registry: list[dict] = []
+        self._weather = "clear"
+        self._season = "spring"
+
         self._generate_world()
 
     def _generate_world(self):
@@ -436,10 +451,6 @@ class World:
         self.projects.append(project)
         return project
 
-    def record_trade(self, trade: dict):
-        self.trades.append(trade)
-        self.trades = self.trades[-120:]
-
     def add_norm_violation(self, violation: dict):
         self.norm_violations.append(violation)
         self.norm_violations = self.norm_violations[-80:]
@@ -572,7 +583,9 @@ class World:
     def regenerate_resources(self):
         for resource, state in self.resources.items():
             if state["renewable"] and state["quantity"] < RESOURCES[resource]["quantity"]:
-                state["quantity"] = min(RESOURCES[resource]["quantity"], state["quantity"] + state["regen_rate"])
+                season_mod = self.get_season_resource_modifier(resource)
+                regen = max(1, int(state["regen_rate"] * season_mod))
+                state["quantity"] = min(RESOURCES[resource]["quantity"], state["quantity"] + regen)
         self._regen_tile_resources()
         self._sync_tile_resource_visuals()
 
@@ -581,17 +594,32 @@ class World:
             return self.tiles[row][col]["walkable"]
         return False
 
-    def find_path(self, start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    def find_path(self, start: tuple[int, int], end: tuple[int, int],
+                  avoidance_targets: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
         if start == end:
             return [start]
-        key = (start, end)
+        avoid_key = tuple(sorted(avoidance_targets)) if avoidance_targets else ()
+        key = (start, end, avoid_key)
         if key in self._path_cache:
             return self._path_cache[key]
-        path = self._a_star(start, end)
+        path = self._a_star(start, end, avoidance_targets)
         self._path_cache[key] = path
+        # Keep cache bounded
+        if len(self._path_cache) > 500:
+            keys = list(self._path_cache.keys())
+            for k in keys[:250]:
+                self._path_cache.pop(k, None)
         return path
 
-    def _a_star(self, start, end):
+    def _a_star(self, start, end, avoidance_targets: list[tuple[int, int]] | None = None):
+        avoid_set: set[tuple[int, int]] = set()
+        if avoidance_targets:
+            for ax, ay in avoidance_targets:
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        if abs(dx) + abs(dy) <= 2:
+                            avoid_set.add((ax + dx, ay + dy))
+
         open_set = [(0, start)]
         came_from = {}
         g_score = {start: 0}
@@ -609,7 +637,10 @@ class World:
                 nb = (current[0] + dc, current[1] + dr)
                 if not self.is_walkable(nb[0], nb[1]) and nb != end:
                     continue
-                tg = g_score[current] + 1
+                move_cost = 1
+                if nb in avoid_set:
+                    move_cost += 50
+                tg = g_score[current] + move_cost
                 if tg < g_score.get(nb, float("inf")):
                     came_from[nb] = current
                     g_score[nb] = tg
@@ -724,8 +755,120 @@ class World:
         return (
             f"Untouched wilderness around a central clearing. {built} structures built so far, "
             f"{claimed} claimed spaces. {len(self.active_proposals)} active proposals, "
-            f"{len(self.projects)} projects, {len(self.trades)} trades. Constitution: {self.constitution.summary()}"
+            f"{len(self.projects)} projects. Constitution: {self.constitution.summary()}"
         )
+
+    # -- Open-ended action system methods --
+
+    def get_objects_at(self, location: str) -> list:
+        return [obj for obj in self.world_objects.values() if obj.location == location]
+
+    def get_objects_by_owner(self, agent_name: str) -> list:
+        return [obj for obj in self.world_objects.values() if obj.owner == agent_name]
+
+    def add_object_to_location(self, obj, location: str):
+        obj.location = location
+        self.world_objects[obj.id] = obj
+
+    def remove_object(self, obj_id: str):
+        self.world_objects.pop(obj_id, None)
+
+    def apply_environmental_change(self, change):
+        location = change.location or ""
+        change_type = change.type
+
+        if change_type == "building_modification" and location:
+            loc = self.locations.get(location)
+            if loc:
+                loc["description"] = loc.get("description", "") + f" {change.description}"
+
+        if change_type == "resource_change" and location:
+            loc = self.locations.get(location)
+            if loc and change.description:
+                pass  # Resource changes handled by consequence engine
+
+        if change_type == "new_path":
+            logger.info("New path created: %s", change.description)
+
+        if change_type == "terrain_modification" and location:
+            loc = self.locations.get(location)
+            if loc:
+                loc["description"] = loc.get("description", "") + f" {change.visual_change}"
+
+        if change_type == "boundary_marker" and location:
+            logger.info("Boundary marker at %s: %s", location, change.description)
+
+    def decay_all_objects(self, weather: str = "clear") -> dict[str, list]:
+        decay_rate = 0.002
+        if weather in ("rain", "storm"):
+            decay_rate *= 1.5
+        broken = []
+        updated = []
+        for obj_id, obj in self.world_objects.items():
+            previous = obj.durability
+            obj.durability = max(0.0, obj.durability - decay_rate)
+            if abs(previous - obj.durability) > 1e-9:
+                updated.append(obj.to_dict())
+            if obj.durability <= 0.0:
+                broken.append(obj_id)
+        for obj_id in broken:
+            obj = self.world_objects.pop(obj_id)
+            logger.info("Object broken: %s (%s)", obj.name, obj_id)
+        return {"updated": [obj for obj in updated if obj["id"] not in broken], "destroyed": broken}
+
+    def get_location_scarcity(self, location: str) -> dict[str, float]:
+        loc = self.locations.get(location)
+        if not loc:
+            return {}
+        scarcity = {}
+        for resource in loc.get("resources", []):
+            res = self.resources.get(resource)
+            if not res:
+                continue
+            original = RESOURCES.get(resource, {}).get("quantity", 1)
+            if original > 0:
+                ratio = res["quantity"] / original
+                scarcity[resource] = round(1.0 - ratio, 2)
+        return scarcity
+
+    def get_weather_modifier(self, action_type: str) -> float:
+        mods = WEATHER_ACTION_MODIFIERS.get(self._weather, {})
+        return mods.get(action_type, 1.0)
+
+    def get_season_resource_modifier(self, resource: str) -> float:
+        mods = SEASON_RESOURCE_MODIFIERS.get(self._season, {})
+        return mods.get(resource, 1.0)
+
+    def get_energy_drain_modifier(self) -> float:
+        weather_mod = WEATHER_ENERGY_DRAIN.get(self._weather, 1.0)
+        season_mod = SEASON_ENERGY_DRAIN.get(self._season, 1.0)
+        return weather_mod * season_mod
+
+    def update_weather_season(self, weather: str, season: str):
+        self._weather = weather
+        self._season = season
+
+    def get_agents_who_can_observe(self, location: str, who_sees: str, noise_level: str, agents: dict) -> list:
+        observers = []
+        noise_reach = {"silent": 0, "quiet": 0, "normal": 1, "loud": 2}
+        reach = noise_reach.get(noise_level, 1)
+
+        for agent in agents.values():
+            if "anyone at this location" in who_sees or "nearby" in who_sees:
+                if agent.current_location == location:
+                    observers.append(agent)
+                elif reach >= 1 and "nearby" in who_sees:
+                    dist = self.get_distance(agent.current_location, location)
+                    if dist <= 8 + reach * 4:
+                        observers.append(agent)
+                elif reach >= 2:
+                    dist = self.get_distance(agent.current_location, location)
+                    if dist <= 8 + reach * 4:
+                        observers.append(agent)
+            elif "nobody" in who_sees:
+                pass
+
+        return observers
 
     def to_save_dict(self) -> dict:
         return {
@@ -734,7 +877,6 @@ class World:
             "resources": self.resources,
             "constitution": self.constitution.to_dict(),
             "created_objects": self.created_objects[-50:],
-            "trades": self.trades[-50:],
             "active_proposals": self.active_proposals[-50:],
             "meetings": self.meetings[-50:],
             "coalitions": self.coalitions[-50:],
@@ -742,7 +884,10 @@ class World:
             "projects": self.projects[-50:],
             "next_building_id": self._next_building_id,
             "tile_resource_state": self.tile_resource_state,
-            "shared_pool": self.shared_pool,
+            "world_objects": {k: v.to_dict() for k, v in self.world_objects.items()},
+            "known_object_types": list(self.known_object_types),
+            "latent_possibilities": self.latent_possibilities[-50:],
+            "innovation_registry": self.innovation_registry[-100:],
         }
 
     def load_from_save(self, data: dict):
@@ -754,8 +899,6 @@ class World:
             self.constitution.load_from_dict(data["constitution"])
         if data.get("created_objects"):
             self.created_objects = data["created_objects"]
-        if data.get("trades"):
-            self.trades = data["trades"]
         if data.get("active_proposals"):
             self.active_proposals = data["active_proposals"]
         if data.get("meetings"):
@@ -766,8 +909,6 @@ class World:
             self.norm_violations = data["norm_violations"]
         if data.get("projects"):
             self.projects = data["projects"]
-        if data.get("shared_pool"):
-            self.shared_pool = data["shared_pool"]
         self._next_building_id = data.get("next_building_id", self._next_building_id)
         self._generate_world()
         if data.get("tile_resource_state"):
@@ -784,3 +925,14 @@ class World:
         self._sync_tile_resource_visuals()
         self._apply_structures_to_tiles()
         self._path_cache.clear()
+
+        # Restore open-ended action system state
+        if data.get("world_objects"):
+            from systems.open_action_models import WorldObject
+            self.world_objects = {k: WorldObject.from_dict(v) for k, v in data["world_objects"].items()}
+        if data.get("known_object_types"):
+            self.known_object_types = set(data["known_object_types"])
+        if data.get("latent_possibilities"):
+            self.latent_possibilities = data["latent_possibilities"]
+        if data.get("innovation_registry"):
+            self.innovation_registry = data["innovation_registry"]

@@ -20,19 +20,29 @@ interface Props {
   onSpeedChange: (speed: number) => void;
   onDashboard: () => void;
   onGodMode: () => void;
+  onTimeline?: () => void;
+  onInnovations?: () => void;
 }
 
-export default function TopBar({ onSpeedChange, onDashboard, onGodMode }: Props) {
+export default function TopBar({ onSpeedChange, onDashboard, onGodMode, onTimeline, onInnovations }: Props) {
   const time = useSimulationStore((s) => s.time);
   const tick = useSimulationStore((s) => s.tick);
   const speed = useSimulationStore((s) => s.speed);
   const connected = useSimulationStore((s) => s.connected);
   const agents = useSimulationStore((s) => s.agents);
+  const worldObjects = useSimulationStore((s) => s.worldObjects);
+  const innovations = useSimulationStore((s) => s.innovations);
+  const patterns = useSimulationStore((s) => s.patterns);
 
   const agentCount = Object.keys(agents).length;
   const avgMood = agentCount > 0
     ? Object.values(agents).reduce((sum, a) => sum + a.state.mood, 0) / agentCount
     : 0;
+
+  // Derived stats
+  const foodCount = worldObjects.filter((o) => o.category === "food").length;
+  const institutionCount = patterns.filter((p) => p.type === "social" || p.type === "norm").length;
+  const innovationCount = innovations.length;
 
   return (
     <div className="h-11 bg-gray-900/95 border-b border-gray-800 flex items-center px-4 gap-4 shrink-0 backdrop-blur-sm">
@@ -46,7 +56,7 @@ export default function TopBar({ onSpeedChange, onDashboard, onGodMode }: Props)
       <div className="flex items-center gap-2">
         {time && <span className="text-sm">{SEASON_ICONS[time.season] || ""}</span>}
         <span className="text-xs text-gray-300 font-medium">
-          {time ? `Day ${time.day} \u2014 ${time.time_string}` : "Loading..."}
+          {time ? `Day ${time.day} - ${time.time_string}` : "Loading..."}
         </span>
         <span className="text-sm">{time ? WEATHER_ICONS[time.weather] || "" : ""}</span>
       </div>
@@ -81,10 +91,35 @@ export default function TopBar({ onSpeedChange, onDashboard, onGodMode }: Props)
             </span>
           </>
         )}
+        {foodCount > 0 && (
+          <span className="text-green-400">\uD83C\uDF3E {foodCount}</span>
+        )}
+        {institutionCount > 0 && (
+          <span className="text-blue-400">\uD83C\uDFDB {institutionCount}</span>
+        )}
+        {innovationCount > 0 && (
+          <span className="text-pink-400">\uD83D\uDCA1 {innovationCount}</span>
+        )}
       </div>
 
       {/* Right side */}
       <div className="ml-auto flex items-center gap-2">
+        {onTimeline && (
+          <button
+            onClick={onTimeline}
+            className="px-2.5 py-1 text-[10px] bg-amber-900/40 hover:bg-amber-800/60 text-amber-300 rounded border border-amber-800/30 transition-colors"
+          >
+            Timeline
+          </button>
+        )}
+        {onInnovations && (
+          <button
+            onClick={onInnovations}
+            className="px-2.5 py-1 text-[10px] bg-pink-900/40 hover:bg-pink-800/60 text-pink-300 rounded border border-pink-800/30 transition-colors"
+          >
+            Innovations
+          </button>
+        )}
         <button
           onClick={onDashboard}
           className="px-2.5 py-1 text-[10px] bg-blue-900/40 hover:bg-blue-800/60 text-blue-300 rounded border border-blue-800/30 transition-colors"

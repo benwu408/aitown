@@ -35,7 +35,7 @@ export interface AgentData {
     wealth: number;
   };
   workingMemory?: {
-    items?: string[];
+    items?: Array<string | { content: string; priority?: number; persistent?: boolean; source?: string }>;
     worry?: string;
     desire?: string;
     unfinished?: string;
@@ -97,6 +97,7 @@ export interface AgentDetail extends AgentData {
 export interface GameEvent {
   type: string;
   agentId?: string;
+  conversationId?: string;
   action?: ActionType;
   targetLocation?: string;
   targetAgent?: string;
@@ -124,4 +125,56 @@ export interface TickData {
   time: SimTime;
   events: GameEvent[];
   agents: AgentData[];
+}
+
+export interface WorldObject {
+  id: string;
+  name: string;
+  description: string;
+  category: 'tool' | 'structure' | 'container' | 'food' | 'medicine' | 'art' | 'clothing' | 'document' | 'marker' | 'furniture' | 'mechanism' | 'other';
+  effects: Record<string, number>;
+  durability: number;
+  size: 'tiny' | 'small' | 'medium' | 'large' | 'structure';
+  portable: boolean;
+  visual_description: string;
+  created_by: string;
+  created_on: number;
+  location: string | null;
+  owner: string | null;
+}
+
+export interface ActionResultEvent {
+  agent_name: string;
+  action_description: string;
+  success: boolean;
+  outcome_description: string;
+  objects_created: string[];
+  tick: number;
+}
+
+export interface InnovationEvent {
+  id: string;
+  name: string;
+  description: string;
+  inventor: string;
+  invented_on: number;
+  adoption_rate: number;
+  adopters: string[];
+  parent_id?: string;
+}
+
+export interface PatternEvent {
+  type: 'economic' | 'social' | 'norm' | 'conflict' | 'innovation';
+  name: string;
+  description: string;
+  emerged_on: number;
+}
+
+export interface TimelineEvent {
+  tick: number;
+  day: number;
+  type: string;
+  title: string;
+  description: string;
+  agents_involved: string[];
 }

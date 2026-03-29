@@ -1,10 +1,9 @@
 import { useEffect, useRef, useCallback } from "react";
 import { Application, Graphics, Container, Text, TextStyle } from "pixi.js";
-import { useWorldStore } from "../stores/worldStore";
 import { useSimulationStore } from "../stores/simulationStore";
 import { TILE_WIDTH, TILE_HEIGHT, gridToScreen } from "../utils/isometric";
 import { TILE_COLORS, BUILDING_COLORS, AGENT_COLORS, ACTION_ICONS } from "../utils/formatting";
-import { AgentData } from "../types/agent";
+import { AgentData, WorldObject } from "../types/agent";
 
 interface Props {
   onAgentClick?: (agentId: string) => void;
@@ -20,13 +19,14 @@ export default function GameCanvas({ onAgentClick }: Props) {
   const agentSpritesRef = useRef<Map<string, Container>>(new Map());
   const agentPosRef = useRef<Map<string, { tx: number; ty: number; cx: number; cy: number }>>(new Map());
   const speechSpriteRef = useRef<Map<string, Container>>(new Map());
+  const objectLayerRef = useRef<Container | null>(null);
+  const objectSpritesRef = useRef<Map<string, Container>>(new Map());
   const animatedTreesRef = useRef<Array<{ canopy: Container; baseX: number; phase: number; sway: number }>>([]);
   const dragRef = useRef({ dragging: false, lastX: 0, lastY: 0, moved: false });
   const unsubRef = useRef<(() => void) | null>(null);
   const unsubBuildingsRef = useRef<(() => void) | null>(null);
   const unsubGridRef = useRef<(() => void) | null>(null);
-
-  const map = useWorldStore((s) => s.map);
+  const unsubObjectsRef = useRef<(() => void) | null>(null);
 
   // Update agent visuals on each tick
   const agents = useSimulationStore((s) => s.agents);
@@ -146,13 +146,16 @@ export default function GameCanvas({ onAgentClick }: Props) {
 
       // Try immediately (might have data from previous connection)
       if (!renderFromBackend()) {
-        // No backend data yet — render placeholder from local map
-        renderMapFromGrid(tileContainer, map.tiles.map((row: any[]) =>
-          row.map((t: any) => ({ col: t.col, row: t.row, type: t.type, decoration: t.decoration, structure: t.building ? { label: "" } : null }))
-        ));
-        renderBuildingsInto(buildingContainer, map.buildings.map((b: any) => ({
-          type: b.type, label: b.label, col: b.col, row: b.row, width: b.width, height: b.height, color: "",
-        })));
+        const blankGrid = Array.from({ length: 40 }, (_, row) =>
+          Array.from({ length: 40 }, (_, col) => ({
+            col,
+            row,
+            type: "grass",
+            decoration: null,
+            structure: null,
+          }))
+        );
+        renderMapFromGrid(tileContainer, blankGrid);
       }
 
       // Subscribe: re-render when backend sends tile data
@@ -169,6 +172,19 @@ export default function GameCanvas({ onAgentClick }: Props) {
               col: b.col, row: b.row, width: b.width, height: b.height, color: "",
             })));
           }
+        }
+      });
+
+      // World object layer (between buildings and agents)
+      const objectLayer = new Container();
+      objectLayer.sortableChildren = true;
+      worldContainer.addChild(objectLayer);
+      objectLayerRef.current = objectLayer;
+
+      // Subscribe to world object changes
+      unsubObjectsRef.current = useSimulationStore.subscribe((state, prev) => {
+        if (state.worldObjects !== prev.worldObjects) {
+          renderWorldObjects(objectLayer, state.worldObjects, state.agents);
         }
       });
 
@@ -452,9 +468,11 @@ export default function GameCanvas({ onAgentClick }: Props) {
     return () => {
       mounted = false;
       agentSpritesRef.current.clear();
+      objectSpritesRef.current.clear();
       unsubRef.current?.();
       unsubBuildingsRef.current?.();
       unsubGridRef.current?.();
+      unsubObjectsRef.current?.();
       if (appRef.current) {
         appRef.current.destroy(true);
         appRef.current = null;
@@ -623,8 +641,9 @@ export default function GameCanvas({ onAgentClick }: Props) {
       const center = gridToScreen(b.col + b.width / 2, b.row + b.height / 2);
 
       const bh =
-        b.type === "church" ? 32
-        : b.type === "town_hall" ? 28
+        b.type === "town_hall" ? 28
+        : b.type === "common_house" ? 26
+        : b.type === "meeting_hall" ? 26
         : b.type === "tavern" ? 24
         : b.type.startsWith("house") ? 18
         : b.type === "pond" || b.type === "park" || b.type === "farm" ? 0
@@ -659,8 +678,9 @@ export default function GameCanvas({ onAgentClick }: Props) {
         g.fill(darkenColor(color, 0.8));
 
         // Roof — slightly different color
-        const roofColor = b.type === "church" ? 0x8b0000
-          : b.type === "tavern" ? 0x6b3410
+        const roofColor = b.type === "tavern" ? 0x6b3410
+          : b.type === "common_house" ? 0x8b0000
+          : b.type === "meeting_hall" ? 0x4f6d8a
           : b.type === "town_hall" ? 0x4a5568
           : b.type.startsWith("house") ? darkenColor(color, 1.1)
           : darkenColor(color, 1.05);
@@ -741,17 +761,13 @@ export default function GameCanvas({ onAgentClick }: Props) {
           g.fill(0xd4af37);
         }
 
-        // Church steeple
-        if (b.type === "church") {
+        if (b.type === "meeting_hall") {
           const cx = (tl.x + br.x) / 2;
           const cy = tl.y - bh;
-          g.poly([{ x: cx, y: cy - 18 }, { x: cx + 6, y: cy }, { x: cx - 6, y: cy }]);
-          g.fill(0xddd8c4);
-          // Cross
-          g.rect(cx - 1, cy - 24, 2, 8);
-          g.fill(0xd4af37);
-          g.rect(cx - 4, cy - 20, 8, 2);
-          g.fill(0xd4af37);
+          g.rect(cx - 1, cy - 14, 2, 14);
+          g.fill(0x4f6d8a);
+          g.rect(cx - 6, cy - 14, 12, 3);
+          g.fill(0x4f6d8a);
         }
 
         // Tavern sign
@@ -931,10 +947,28 @@ function createAgentSprite(agent: AgentData): Container {
   iconText.label = "icon";
   container.addChild(iconText);
 
-  // Selection ring (hidden by default)
+  // Distress indicator (hidden by default): red pulsing circle
+  const distress = new Graphics();
+  distress.circle(0, -20, 3);
+  distress.fill({ color: 0xff3333, alpha: 0.9 });
+  // Exclamation mark
+  const excl = new Text({
+    text: "!",
+    style: new TextStyle({ fontSize: 5, fill: 0xffffff, fontWeight: "bold" }),
+  });
+  excl.x = -1.5;
+  excl.y = -23;
+  distress.addChild(excl);
+  distress.visible = false;
+  distress.label = "distress";
+  container.addChild(distress);
+
+  // Selection ring (more visible with glow effect)
   const ring = new Graphics();
+  ring.circle(0, -4, 14);
+  ring.stroke({ width: 1.5, color: 0xffd700, alpha: 0.4 });
   ring.circle(0, -4, 12);
-  ring.stroke({ width: 2, color: 0xffd700, alpha: 0.8 });
+  ring.stroke({ width: 2, color: 0xffd700, alpha: 0.9 });
   ring.visible = false;
   ring.label = "ring";
   container.addChild(ring);
@@ -960,6 +994,155 @@ function updateAgentSprite(
   const ring = sprite.children.find((c) => c.label === "ring");
   if (ring) {
     ring.visible = selected;
+  }
+
+  // Distress indicator: red tint when mood is very low or dominant emotion is negative
+  const distress = sprite.children.find((c) => c.label === "distress");
+  const isDistressed =
+    !!(agent.state && agent.state.mood < 0.2) ||
+    !!(agent.emotion && ["angry", "furious", "terrified", "desperate", "panicked"].includes(agent.emotion.toLowerCase()));
+  if (distress) {
+    distress.visible = isDistressed;
+  }
+}
+
+const OBJECT_CATEGORY_COLORS: Record<string, number> = {
+  tool: 0x8b6914,
+  structure: 0x888888,
+  container: 0xc4a882,
+  food: 0x4a8c3f,
+  medicine: 0x228b22,
+  art: 0xd4789a,
+  clothing: 0x6a5acd,
+  document: 0xf5f0dc,
+  marker: 0x999999,
+  furniture: 0xc4a882,
+  mechanism: 0x4682b4,
+  other: 0x888888,
+};
+
+const OBJECT_CATEGORY_LABELS: Record<string, string> = {
+  tool: "T",
+  structure: "S",
+  container: "C",
+  food: "F",
+  medicine: "+",
+  art: "A",
+  clothing: "W",
+  document: "D",
+  marker: "M",
+  furniture: "H",
+  mechanism: "G",
+  other: "?",
+};
+
+function renderWorldObjects(
+  layer: Container,
+  objects: WorldObject[],
+  agents: Record<string, AgentData>
+) {
+  // Clear existing
+  layer.removeChildren();
+
+  for (const obj of objects) {
+    const container = new Container();
+    const color = OBJECT_CATEGORY_COLORS[obj.category] || 0x888888;
+    const label = OBJECT_CATEGORY_LABELS[obj.category] || "?";
+
+    // Determine position: if portable and has owner, show near agent; otherwise use location
+    let gridCol = 20;
+    let gridRow = 20;
+
+    if (obj.portable && obj.owner) {
+      const ownerAgent = Object.values(agents).find(
+        (a) => a.name === obj.owner || a.id === obj.owner
+      );
+      if (ownerAgent) {
+        gridCol = ownerAgent.position[0] + 0.5;
+        gridRow = ownerAgent.position[1] + 0.5;
+      }
+    } else if (obj.location) {
+      // Hash location string to a rough grid position
+      let hash = 0;
+      for (let i = 0; i < obj.location.length; i++) {
+        hash = ((hash << 5) - hash + obj.location.charCodeAt(i)) | 0;
+      }
+      gridCol = 5 + Math.abs(hash % 30);
+      gridRow = 5 + Math.abs((hash >> 8) % 30);
+    }
+
+    const { x, y } = gridToScreen(gridCol, gridRow);
+    container.x = x;
+    container.y = y - 4;
+    container.zIndex = gridCol + gridRow + 50;
+
+    const g = new Graphics();
+
+    // Size determines shape size
+    const sizeMap: Record<string, number> = {
+      tiny: 3,
+      small: 5,
+      medium: 7,
+      large: 10,
+      structure: 14,
+    };
+    const radius = sizeMap[obj.size] || 5;
+
+    if (obj.category === "structure" || obj.category === "marker") {
+      // Ground overlay: diamond shape
+      g.poly([
+        { x: 0, y: -radius },
+        { x: radius, y: 0 },
+        { x: 0, y: radius },
+        { x: -radius, y: 0 },
+      ]);
+      g.fill({ color, alpha: 0.6 });
+      g.stroke({ width: 0.5, color: darkenColor(color, 0.7), alpha: 0.8 });
+    } else {
+      // Small object: circle/rect
+      if (obj.size === "tiny") {
+        g.circle(0, 0, radius);
+        g.fill({ color, alpha: 0.8 });
+      } else {
+        g.roundRect(-radius, -radius, radius * 2, radius * 2, 2);
+        g.fill({ color, alpha: 0.7 });
+        g.stroke({ width: 0.5, color: darkenColor(color, 0.7), alpha: 0.6 });
+      }
+    }
+
+    container.addChild(g);
+
+    // Category letter label
+    const labelText = new Text({
+      text: label,
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: Math.max(6, radius),
+        fill: 0xffffff,
+        fontWeight: "bold",
+      }),
+    });
+    labelText.x = -labelText.width / 2;
+    labelText.y = -labelText.height / 2;
+    container.addChild(labelText);
+
+    // Name tooltip on hover (just tiny text below)
+    if (obj.size !== "tiny") {
+      const nameText = new Text({
+        text: obj.name,
+        style: new TextStyle({
+          fontFamily: "monospace",
+          fontSize: 5,
+          fill: 0xcccccc,
+          dropShadow: { alpha: 0.7, blur: 1, color: 0x000000, distance: 0 },
+        }),
+      });
+      nameText.x = -nameText.width / 2;
+      nameText.y = radius + 2;
+      container.addChild(nameText);
+    }
+
+    layer.addChild(container);
   }
 }
 

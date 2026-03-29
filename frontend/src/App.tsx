@@ -6,6 +6,8 @@ import LiveFeed from "./components/panels/LiveFeed";
 import GodModePanel from "./components/panels/GodModePanel";
 import Dashboard from "./components/panels/Dashboard";
 import StoryHighlights from "./components/panels/StoryHighlights";
+import WorldTimeline from "./components/panels/WorldTimeline";
+import InnovationTree from "./components/panels/InnovationTree";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useSimulationStore } from "./stores/simulationStore";
 
@@ -13,6 +15,8 @@ function App() {
   const { send } = useWebSocket();
   const [godMode, setGodMode] = useState(false);
   const [dashboard, setDashboard] = useState(false);
+  const [timeline, setTimeline] = useState(false);
+  const [innovations, setInnovations] = useState(false);
   const autobiography = useSimulationStore((s) => s.autobiography);
   const selectedAgentId = useSimulationStore((s) => s.selectedAgentId);
 
@@ -39,6 +43,8 @@ function App() {
         onSpeedChange={handleSpeedChange}
         onDashboard={() => setDashboard(true)}
         onGodMode={() => setGodMode(true)}
+        onTimeline={() => setTimeline(true)}
+        onInnovations={() => setInnovations(true)}
       />
 
       <div className="flex flex-1 min-h-0">
@@ -74,6 +80,8 @@ function App() {
       {/* Overlays */}
       {godMode && <GodModePanel onSend={send} onClose={() => setGodMode(false)} />}
       {dashboard && <Dashboard onSend={send} onClose={() => setDashboard(false)} />}
+      {timeline && <WorldTimeline onClose={() => setTimeline(false)} />}
+      {innovations && <InnovationTree onClose={() => setInnovations(false)} />}
 
       {/* Autobiography Modal */}
       {autobiography && (

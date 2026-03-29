@@ -17,11 +17,11 @@ const MEMORY_ICONS: Record<string, string> = {
 };
 
 const OPINION_LABELS: Record<string, string> = {
-  taxes: "Taxes",
-  clinic_funding: "Clinic Funding",
-  modernization: "Modernization",
+  taxes: "Shared Burdens",
+  clinic_funding: "Care Priorities",
+  modernization: "Change",
   outsiders: "Outsiders",
-  school_budget: "School Budget",
+  school_budget: "Learning Priorities",
   tradition: "Tradition",
 };
 
@@ -299,12 +299,15 @@ export default function MindTab({ agent, detail }: Props) {
         <div>
           <div className="text-[10px] text-gray-500 uppercase mb-1">Working Memory</div>
           <div className="space-y-0.5">
-            {workingItems.map((item: string, i: number) => (
-              <div key={i} className="text-[10px] text-gray-400 p-1 bg-gray-800/30 rounded">
-                {i === 0 && <span className="text-amber-400 mr-1">[focus]</span>}
-                {item}
-              </div>
-            ))}
+            {workingItems.map((item: any, i: number) => {
+              const text = typeof item === 'string' ? item : item?.content || '';
+              return (
+                <div key={i} className="text-[10px] text-gray-400 p-1 bg-gray-800/30 rounded">
+                  {i === 0 && <span className="text-amber-400 mr-1">[focus]</span>}
+                  {text}
+                </div>
+              );
+            })}
             {agent.workingMemory.worry && (
               <div className="text-[10px] text-red-400/70 p-1 bg-red-900/10 rounded">
                 Worry: {agent.workingMemory.worry}

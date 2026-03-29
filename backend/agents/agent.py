@@ -50,19 +50,26 @@ class Agent:
         self.plan_mode: str = "improvising"
         self.plan_deviation_reason: str = ""
         self.self_concept: str | None = None  # Emerges over time
+        self.daily_priorities: list[str] = []
+        self._recent_inner_thoughts: list[str] = []
+        self._last_routine_action: dict | None = None
+        self.goal_hierarchy_migrated: bool = False
 
         # Cognitive Architecture
         baseline_v = (profile.personality.get("agreeableness", 0.5) + profile.personality.get("extraversion", 0.5)) / 2 - 0.2
         self.emotional_state = EmotionalState(baseline_valence=baseline_v)
         self.drives = DriveSystem()
-        self.drives.hunger = 0.5  # Haven't eaten in a while — need food soon
-        # Personality-seeded shelter urgency: neurotic agents feel it sooner, open agents are fine roughing it
+        self.drives.hunger = 0.5
+        self.drives.thirst = 0.35
         neuro = profile.personality.get("neuroticism", 0.5)
         openness = profile.personality.get("openness", 0.5)
         self.drives.shelter_need = 0.15 + neuro * 0.3 - openness * 0.1
         self.drives._shelter_growth_rate = 0.0007 + neuro * 0.0006 + profile.personality.get("conscientiousness", 0.5) * 0.0003
-        self.drives.purpose_need = 0.5  # Why are we here?
+        self.drives.purpose_need = 0.5
         self.drives.social_need = 0.3
+        self.drives.belonging = 0.3 + neuro * 0.1
+        self.drives.energy = 0.7
+        self.drives.health = 1.0
         self.episodic_memory = EpisodicMemory()
         self.working_memory = WorkingMemory()
         self.belief_system = BeliefSystem()
@@ -83,9 +90,6 @@ class Agent:
         self.active_goals: list[dict] = []
         self.transactions: list[dict] = []
         self.inventory: list[dict] = []
-        self.debt: float = 0
-        self.daily_income: float = 0
-        self.daily_expenses: float = 0
         self.social_commitments: list[dict] = []
         self.current_commitment: dict | None = None
         self.opinions: dict = {}
@@ -97,6 +101,10 @@ class Agent:
         self.is_sick: bool = False
         self.sick_since_tick: int = 0
         self.last_steal_attempt_tick: int = -999
+
+        # Open-ended action queue
+        self.pending_action: object | None = None  # ActionResult being executed
+        self.action_ticks_remaining: int = 0
 
         # Movement
         self.path: list[tuple[int, int]] = []
@@ -120,15 +128,9 @@ class Agent:
         self.working_memory.push("I need to find food, water, and shelter.")
         self.working_memory.set_worry("What if there isn't enough for everyone?")
 
-    def _inventory_value(self) -> float:
-        """Rough 'wealth' estimate based on effort values of held items."""
-        from systems.economy import EFFORT_VALUES
-        total = 0.0
-        for item in self.inventory:
-            name = item.get("name", "")
-            qty = int(item.get("quantity", 1))
-            total += EFFORT_VALUES.get(name, 1.0) * qty
-        return round(total, 1)
+    def _inventory_count_total(self) -> int:
+        """Total number of items held."""
+        return sum(int(item.get("quantity", 1)) for item in self.inventory)
 
     def inventory_count(self, item_name: str) -> int:
         total = 0
@@ -179,6 +181,56 @@ class Agent:
             "chosen": chosen,
             "considered": ranked,
         }
+
+    def add_intention(self, goal: str, why: str, urgency: float, source: str,
+                      target_location: str | None = None, next_step: str = "",
+                      status: str = "candidate", created_tick: int = 0,
+                      expires_after_ticks: int = 200, refresh_on_relevance: bool = False,
+                      extra: dict | None = None):
+        if not goal:
+            return
+        goal = str(goal).strip()
+        if not goal:
+            return
+        existing = next((intent for intent in self.active_intentions if intent.get("goal") == goal and intent.get("source") == source), None)
+        payload = {
+            "goal": goal,
+            "why": why,
+            "urgency": round(float(urgency), 2),
+            "source": source,
+            "target_location": target_location or self.current_location,
+            "next_step": next_step or goal,
+            "status": status,
+            "created_tick": int(created_tick),
+            "expires_after_ticks": int(expires_after_ticks),
+            "refresh_on_relevance": bool(refresh_on_relevance),
+        }
+        if extra:
+            payload.update(extra)
+        if existing:
+            existing.update(payload)
+        else:
+            self.active_intentions.insert(0, payload)
+        self.active_intentions = self.active_intentions[:8]
+
+    def prune_expired_intentions(self, current_tick: int):
+        kept = []
+        for intent in self.active_intentions:
+            created = int(intent.get("created_tick", current_tick))
+            ttl = int(intent.get("expires_after_ticks", 200))
+            expired = (current_tick - created) > ttl
+            if not expired:
+                kept.append(intent)
+                continue
+            if intent.get("urgency", 0.0) >= 0.7:
+                worry = intent.get("why") or intent.get("goal")
+                if worry:
+                    self.working_memory.set_worry(str(worry))
+            if intent.get("refresh_on_relevance"):
+                intent["created_tick"] = current_tick
+                intent["urgency"] = round(max(0.25, float(intent.get("urgency", 0.5)) - 0.1), 2)
+                kept.append(intent)
+        self.active_intentions = kept[:8]
 
     def note_reciprocity(self, other_name: str, gave: dict | None = None, received: dict | None = None):
         ledger = self.reciprocity_ledger.setdefault(other_name, {"gave": {}, "received": {}, "balance": 0.0})
@@ -292,9 +344,9 @@ class Agent:
 
         return events
 
-    def start_walking(self, target_loc: str):
+    def start_walking(self, target_loc: str, avoidance_targets: list[tuple[int, int]] | None = None):
         target = self.world.get_location_entry(target_loc)
-        self.path = self.world.find_path(self.position, target)
+        self.path = self.world.find_path(self.position, target, avoidance_targets=avoidance_targets)
         self.path_index = 0
         self.move_target = target_loc
         self.current_action = ActionType.WALKING
@@ -331,8 +383,30 @@ class Agent:
         self.current_action = ActionType.IDLE
         self.sleep_until_tick = 0
 
+    def start_open_action(self, action_result):
+        self.pending_action = action_result
+        self.action_ticks_remaining = action_result.evaluation.time_ticks
+        self.current_action = ActionType.WORKING if hasattr(ActionType, "WORKING") else ActionType.IDLE
+
+    def tick_open_action(self) -> bool:
+        if self.pending_action is None:
+            return False
+        self.action_ticks_remaining -= 1
+        return self.action_ticks_remaining <= 0
+
+    def complete_open_action(self, tick: int):
+        if self.pending_action is not None:
+            self.pending_action.tick_completed = tick
+        result = self.pending_action
+        self.pending_action = None
+        self.action_ticks_remaining = 0
+        self.current_action = ActionType.IDLE
+        return result
+
+    def has_pending_action(self) -> bool:
+        return self.pending_action is not None and self.action_ticks_remaining > 0
+
     def get_routine_action(self, hour: float, time_of_day: str) -> dict:
-        """Drive-based routine behavior — agents only go to places they know or can see."""
         import random as _rand
 
         # Allow agents with strong purpose to resist non-critical drive interrupts
@@ -500,10 +574,7 @@ class Agent:
                 "hunger": round(self.drives.hunger, 2),
                 "mood": round(max(0, min(1, (self.emotional_state.valence + 1) / 2)), 2),
                 "health": round(self.health, 2),
-                "wealth": self._inventory_value(),
-                "debt": round(self.debt, 1),
-                "dailyIncome": round(self.daily_income, 1),
-                "dailyExpenses": round(self.daily_expenses, 1),
+                "itemCount": self._inventory_count_total(),
                 "tradeCount": len(self.transactions),
             },
             "emotions": self.emotional_state.to_dict(),

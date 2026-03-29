@@ -43,6 +43,27 @@ export function useWebSocket() {
             store.getState().setDashboardData(msg.data);
           } else if (msg.type === "autobiography") {
             store.getState().setAutobiography(msg.data);
+          } else if (msg.type === "world_object_delta") {
+            const delta = msg.data;
+            if (delta.created && delta.created.length > 0) {
+              store.getState().addWorldObjects(delta.created);
+            }
+            if (delta.destroyed && delta.destroyed.length > 0) {
+              store.getState().removeWorldObjects(delta.destroyed);
+            }
+            if (delta.updated) {
+              for (const obj of delta.updated) {
+                store.getState().updateWorldObject(obj);
+              }
+            }
+          } else if (msg.type === "action_result") {
+            store.getState().addActionResult(msg.data);
+          } else if (msg.type === "innovation_event") {
+            store.getState().addInnovation(msg.data);
+          } else if (msg.type === "pattern_event") {
+            store.getState().addPattern(msg.data);
+          } else if (msg.type === "timeline_event") {
+            store.getState().addTimelineEvent(msg.data);
           }
         } catch (e) {
           console.error("Failed to parse WS message:", e);

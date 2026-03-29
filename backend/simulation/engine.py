@@ -12,7 +12,6 @@ from agents.agent import Agent
 from agents.profiles import AGENT_PROFILES
 from simulation.actions import ActionType
 from db.database import init_db, save_world_state, load_world_state
-from systems.economy import EconomySystem
 
 logger = logging.getLogger("agentica.engine")
 
@@ -24,7 +23,7 @@ class SimulationEngine:
         self.running = False
         self.time_manager = TimeManager(ticks_per_day=TICKS_PER_DAY)
         self.world = World()
-        self.economy = EconomySystem()
+        self.world._time_manager = self.time_manager
         self._broadcast: Callable[[dict], Coroutine] | None = None
         self.agents: dict[str, Agent] = {}
         self.story_highlights: list[dict] = []
@@ -64,6 +63,105 @@ class SimulationEngine:
                             return pos
         return (cx + 1, cy + 1)
 
+    def _run_reflection_catchup(self, agent: Agent):
+        todays = agent.episodic_memory.episodes[-20:]
+        agent.identity.detect_tensions(agent.belief_system.beliefs, agent.relationships, todays)
+        agent.identity.generate_goals_from_tensions()
+        agent.identity.update_self_narrative(todays, agent.belief_system.beliefs)
+        migrated_goals = []
+        for goal in getattr(agent.identity, "long_arc_goals", [])[:4]:
+            text = str(goal.get("text", "")).strip()
+            if not text:
+                continue
+            migrated_goals.append({
+                "text": text,
+                "why": goal.get("why") or "This feels tied to who I'm becoming.",
+                "priority": round(float(goal.get("priority", 0.6)), 2),
+                "category": goal.get("category", "identity"),
+                "source": goal.get("source", "identity_tension"),
+            })
+        agent.long_term_goals = migrated_goals
+        agent.active_goals = [
+            goal for goal in agent.active_goals
+            if goal.get("status") == "active" and goal.get("kind") == "daily_focus"
+        ]
+        for goal in agent.long_term_goals[:3]:
+            if not any(existing.get("text") == goal.get("text") for existing in agent.active_goals):
+                agent.active_goals.append({
+                    "text": goal.get("text", ""),
+                    "status": "active",
+                    "source": goal.get("source", "identity_tension"),
+                    "priority": goal.get("priority", 0.6),
+                    "created_tick": self.tick,
+                    "kind": "long_arc",
+                })
+        agent.active_goals = agent.active_goals[:6]
+
+    def _migrate_goal_hierarchy(self, agent: Agent, saved: dict):
+        legacy_long_term = saved.get("long_term_goals", []) or []
+        explicit_identity_goals = [
+            goal for goal in legacy_long_term
+            if isinstance(goal, dict) and str(goal.get("source", "")).startswith("identity")
+        ]
+        if explicit_identity_goals:
+            agent.long_term_goals = explicit_identity_goals[:4]
+        else:
+            agent.long_term_goals = []
+            for goal in legacy_long_term[:6]:
+                if isinstance(goal, dict):
+                    text = goal.get("text") or goal.get("goal") or ""
+                else:
+                    text = str(goal)
+                text = str(text).strip()
+                if not text:
+                    continue
+                agent.add_intention(
+                    text,
+                    "Recovered from an older save and needs reevaluation.",
+                    0.55,
+                    "save_migration",
+                    target_location=agent.current_location,
+                    next_step=text,
+                    status="candidate",
+                    created_tick=self.tick,
+                    expires_after_ticks=180,
+                    refresh_on_relevance=True,
+                )
+        for intent in list(agent.active_intentions):
+            intent.setdefault("created_tick", self.tick)
+            intent.setdefault("expires_after_ticks", 200)
+            intent.setdefault("refresh_on_relevance", False)
+        self._run_reflection_catchup(agent)
+        agent.goal_hierarchy_migrated = True
+
+    async def _synthesize_conversation_models(self, convo, participants: list[Agent]):
+        from llm.client import llm_client
+
+        significant = bool(
+            convo.structured_commitments
+            or convo.structured_proposals
+            or convo.interaction_type in {"deep_conversation", "argument", "negotiation", "comforting"}
+        )
+        if not significant:
+            return
+        summary_lines = []
+        for turn in convo.turns[-6:]:
+            speaker = turn.get("speaker")
+            speech = turn.get("speech", "")
+            if speaker and speech:
+                summary_lines.append(f"{speaker}: {speech[:160]}")
+        summary = "\n".join(summary_lines) or f"A significant {convo.interaction_type} happened."
+        for agent in participants:
+            for other in participants:
+                if other.id == agent.id:
+                    continue
+                await agent.mental_models.synthesize_after_interaction(
+                    agent,
+                    other,
+                    interaction_summary=summary,
+                    llm_client=llm_client,
+                )
+
     def _restore_from_save(self, data: dict):
         self.tick = data.get("tick", 0)
         self.time_manager.day = data.get("day", 0)
@@ -75,6 +173,7 @@ class SimulationEngine:
 
         if data.get("world"):
             self.world.load_from_save(data["world"])
+            self.world._time_manager = self.time_manager
 
         saved_agents = data.get("agents", {})
         for agent_id, agent in self.agents.items():
@@ -140,6 +239,7 @@ class SimulationEngine:
             agent.is_sick = saved.get("is_sick", False)
             agent.sick_since_tick = saved.get("sick_since_tick", 0)
             agent.last_steal_attempt_tick = saved.get("last_steal_attempt_tick", -999)
+            self._migrate_goal_hierarchy(agent, saved)
 
         for agent in self.agents.values():
             if not agent.path and agent.current_action in (ActionType.WALKING, ActionType.TALKING):
@@ -207,7 +307,7 @@ class SimulationEngine:
                 except Exception as e:
                     logger.error("Tick %s error: %s", self.tick, e)
 
-                if self.tick % 60 == 0:
+                if self.tick % 5 == 0:
                     asyncio.create_task(self._process_inner_monologue_background())
                 if self.tick % 200 == 0:
                     self.world.regenerate_resources()
@@ -229,6 +329,10 @@ class SimulationEngine:
                                 "storyHighlights": self.story_highlights[-20:],
                                 "tileGrid": self.world.get_tile_grid(),
                                 "buildings": self.world.get_buildings_list(),
+                                "worldObjects": self._serialize_world_objects(),
+                                "innovations": self._serialize_innovations(),
+                                "patterns": self._serialize_patterns(),
+                                "timelineEvents": self._serialize_timeline_events(),
                             },
                         })
                         self._world_state_dirty = False
@@ -382,6 +486,11 @@ class SimulationEngine:
         }
         self.world.add_proposal(proposal)
         proposer.set_proposal_stance(proposal["id"], "support", "I proposed this.", legitimacy=proposal["legitimacy"])
+        from systems.pattern_detector import pattern_detector
+        pattern_detector.record_action(proposer.name, {
+            "type": "proposal", "location": location, "target": "",
+            "description": description[:80],
+        }, self.tick)
         return proposal
 
     def _make_meeting(self, topic: str, location: str, participants: list[str], related_proposal_ids: list[str]) -> dict:
@@ -446,9 +555,7 @@ class SimulationEngine:
 
     def _evaluate_proposal_kind(self, description: str) -> str:
         lower = description.lower()
-        if any(word in lower for word in ("currency", "money", "trade", "market", "price", "barter", "exchange", "tax", "tariff")):
-            return "economic_rule"
-        if any(word in lower for word in ("rule", "respect", "share", "must", "should")):
+        if any(word in lower for word in ("rule", "respect", "share", "must", "should", "currency", "money", "trade", "market", "price", "barter", "exchange", "tax", "tariff")):
             return "social_rule"
         if any(word in lower for word in ("meeting", "gathering place", "hall")):
             return "institution"
@@ -583,16 +690,18 @@ class SimulationEngine:
                 description = f"Help with {project.get('name')}"
                 if not any(i.get("goal") == description for i in agent.active_intentions):
                     next_step = f"Bring materials to {location}" if role == "supplier" else f"Work on {project.get('name')} at {location}"
-                    agent.active_intentions.insert(0, {
-                        "goal": description,
-                        "why": "This project needs follow-through from the people backing it.",
-                        "urgency": 0.62,
-                        "source": "project",
-                        "target_location": location,
-                        "next_step": next_step,
-                        "status": "active",
-                    })
-                    agent.active_intentions = agent.active_intentions[:8]
+                    agent.add_intention(
+                        description,
+                        "This project needs follow-through from the people backing it.",
+                        0.62,
+                        "project",
+                        target_location=location,
+                        next_step=next_step,
+                        status="active",
+                        created_tick=self.tick,
+                        expires_after_ticks=240,
+                        refresh_on_relevance=True,
+                    )
             project["assigned_roles"] = assigned_roles
             if assigned_roles:
                 events.append({"type": "system_event", "eventType": "project_staffed", "label": "Project Staffing", "description": f"{project.get('name')} assigned {len(assigned_roles)} roles."})
@@ -726,29 +835,7 @@ class SimulationEngine:
         description = proposal.get("description", "")
         location = proposal.get("location", "clearing")
         kind = proposal.get("kind", "collective_decision")
-        if kind == "economic_rule":
-            # Write the rule into the constitution's economic rules
-            lower = description.lower()
-            if "currency" in lower or "money" in lower:
-                # Extract what they want to use as currency
-                self.world.constitution.economic_rules["currency"] = description
-                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Economic Rule", "description": f"Currency established: {description}"})
-                self._add_story_highlight("milestone", f"Economic rule adopted: {description}", None, None)
-            elif "market" in lower:
-                self.world.constitution.economic_rules["trade_rules"].append(description)
-                # Create a market as a project
-                project = self._create_project_from_proposal(proposal)
-                events.append({"type": "system_event", "eventType": "project_started", "label": "Market", "description": f"Market project started: {description}"})
-            elif "tax" in lower or "tariff" in lower:
-                self.world.constitution.economic_rules["taxation"] = description
-                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Taxation", "description": description})
-            else:
-                self.world.constitution.economic_rules["trade_rules"].append(description)
-                events.append({"type": "system_event", "eventType": "economic_rule", "label": "Trade Rule", "description": description})
-            # Also add as a norm so agents recognize it
-            self.world.add_norm(description, self.tick, category="economic", origin="collective_agreement")
-            self.world.constitution.change_history.append({"tick": self.tick, "type": "economic_rule_adopted", "description": description})
-        elif kind == "social_rule":
+        if kind in ("economic_rule", "social_rule"):
             norm = self.world.add_norm(description, self.tick, category="proposal", origin="collective_agreement")
             self.world.constitution.change_history.append({"tick": self.tick, "type": "proposal_accepted", "description": description})
             events.append({"type": "system_event", "eventType": "norm_emergence", "label": "Social Norm", "description": norm["text"]})
@@ -783,16 +870,18 @@ class SimulationEngine:
             project = self._create_project_from_proposal(proposal)
             for agent in self.agents.values():
                 if agent.name in project.get("supporters", []) or agent.name == project.get("sponsor"):
-                    agent.active_intentions.insert(0, {
-                        "goal": f"Help build {project['name']}",
-                        "why": "This project now has enough support to become real.",
-                        "urgency": 0.64,
-                        "source": "project",
-                        "target_location": project["location"],
-                        "next_step": f"Bring materials and work on {project['name']}",
-                        "status": "active",
-                    })
-                    agent.active_intentions = agent.active_intentions[:8]
+                    agent.add_intention(
+                        f"Help build {project['name']}",
+                        "This project now has enough support to become real.",
+                        0.64,
+                        "project",
+                        target_location=project["location"],
+                        next_step=f"Bring materials and work on {project['name']}",
+                        status="active",
+                        created_tick=self.tick,
+                        expires_after_ticks=240,
+                        refresh_on_relevance=True,
+                    )
             events.append({"type": "system_event", "eventType": "project_started", "label": "Project Started", "description": project["name"]})
         else:
             norm = self.world.add_norm(f"People should honor decisions like: {description}", self.tick, category="governance", origin="proposal")
@@ -993,16 +1082,18 @@ class SimulationEngine:
                 project["blockers"] = [f"Need more {m.replace('_', ' ')}" for m in missing]
                 for worker in workers:
                     worker.add_blocked_reason(project["blockers"][0], self.tick, severity=0.6)
-                    worker.active_intentions.insert(0, {
-                        "goal": f"Find materials for {project['name']}",
-                        "why": f"The project is blocked until we bring more {missing[0].replace('_', ' ')}.",
-                        "urgency": 0.6,
-                        "source": "project_supply",
-                        "target_location": "forest_edge" if missing[0] == "wood" else project.get("location"),
-                        "next_step": f"gather {missing[0].replace('_', ' ')}",
-                        "status": "active",
-                    })
-                    worker.active_intentions = worker.active_intentions[:8]
+                    worker.add_intention(
+                        f"Find materials for {project['name']}",
+                        f"The project is blocked until we bring more {missing[0].replace('_', ' ')}.",
+                        0.6,
+                        "project_supply",
+                        target_location="forest_edge" if missing[0] == "wood" else project.get("location"),
+                        next_step=f"gather {missing[0].replace('_', ' ')}",
+                        status="active",
+                        created_tick=self.tick,
+                        expires_after_ticks=220,
+                        refresh_on_relevance=True,
+                    )
                 continue
             project["current_stage"] = "building"
             project["blockers"] = []
@@ -1053,178 +1144,20 @@ class SimulationEngine:
         return events
 
     def _execute_trade(self, agent: Agent, partner: Agent, give_item: str, give_qty: int, recv_item: str, recv_qty: int, context: str = "barter") -> list[dict]:
-        """Execute an inventory swap between two agents. Returns events."""
-        events = []
-        if not agent.consume_inventory(give_item, give_qty):
-            return events
-        if not partner.consume_inventory(recv_item, recv_qty):
-            # Rollback
-            agent.inventory.append({"name": give_item, "quantity": give_qty})
-            return events
-
-        agent.inventory.append({"name": recv_item, "quantity": recv_qty})
-        partner.inventory.append({"name": give_item, "quantity": give_qty})
-
-        # Record in world trade log
-        trade = {
-            "from_agent": agent.name,
-            "to_agent": partner.name,
-            "items_given": {give_item: give_qty},
-            "items_received": {recv_item: recv_qty},
-            "item": recv_item,
-            "context": context,
-            "tick": self.tick,
-        }
-        self.world.record_trade(trade)
-
-        # Record in economy system
-        self.economy.record_trade(
-            self.tick, agent.name, partner.name,
-            give_item, give_qty, recv_item, recv_qty,
-            context=context, season=self.time_manager.season,
-        )
-
-        # Update reciprocity and mental models
-        agent.note_reciprocity(partner.name, gave={give_item: give_qty}, received={recv_item: recv_qty})
-        partner.note_reciprocity(agent.name, gave={recv_item: recv_qty}, received={give_item: give_qty})
-        agent.mental_models.update_from_interaction(partner.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
-        partner.mental_models.update_from_interaction(agent.name, tick=self.tick, generosity_delta=0.04, reliability_delta=0.03, alliance_delta=0.02)
-
-        # Skill tracking
-        agent.skill_memory.record_attempt("trading", True, 0.5)
-        partner.skill_memory.record_attempt("trading", True, 0.5)
-
+        """Legacy shim: route exchange attempts through the open-ended action executor."""
         give_label = give_item.replace("_", " ")
         recv_label = recv_item.replace("_", " ")
-        agent.add_life_event(f"Traded {give_qty} {give_label} for {recv_qty} {recv_label} with {partner.name}.", self.tick, category="trade", impact=0.35)
-        partner.add_life_event(f"Traded {recv_qty} {recv_label} for {give_qty} {give_label} with {agent.name}.", self.tick, category="trade", impact=0.35)
-
-        events.append({"type": "transaction", "agentId": agent.id, "item": recv_item, "price": give_qty, "action": "barter"})
-        events.append({"type": "system_event", "eventType": "barter_trade", "label": "Trade", "description": f"{agent.name} traded {give_qty} {give_label} for {recv_qty} {recv_label} with {partner.name}."})
-        return events
-
-    def _attempt_barter_trades(self) -> list[dict]:
-        """Drive-based automatic bartering + resolve conversation-initiated trade intentions."""
-        events = []
-
-        # 1. Resolve conversation-initiated trade intentions
-        events.extend(self._resolve_trade_intentions())
-
-        # 2. Automatic need-based bartering for desperate agents
-        from systems.economy import FOOD_ITEMS, BUILDING_ITEMS
-        for agent in self.agents.values():
-            if agent.drives.hunger < 0.75 and agent.drives.shelter_need < 0.75:
-                continue
-            # Determine what we need and what we can offer
-            if agent.drives.hunger >= agent.drives.shelter_need:
-                desired_set = FOOD_ITEMS
-                surplus_set = BUILDING_ITEMS
-            else:
-                desired_set = BUILDING_ITEMS
-                surplus_set = FOOD_ITEMS
-
-            # Find what we have surplus of
-            surplus_item = None
-            for item_name in surplus_set:
-                if agent.inventory_count(item_name) > 1:
-                    surplus_item = item_name
-                    break
-            if not surplus_item:
-                continue
-
-            # Find a co-located partner who has what we need
-            desired_item = None
-            best_partner = None
-            best_score = -1.0
-            for other in self.agents.values():
-                if other.id == agent.id or other.current_location != agent.current_location:
-                    continue
-                for d in desired_set:
-                    if other.inventory_count(d) > 0:
-                        score = self._support_score_for(agent, other.name)
-                        if score > best_score:
-                            best_score = score
-                            best_partner = other
-                            desired_item = d
-
-            if not best_partner or not desired_item:
-                continue
-
-            # Use economy system to figure out a fair exchange rate
-            rate = self.economy.get_suggested_rate(surplus_item, desired_item, self.time_manager.season)
-            give_qty = 1
-            recv_qty = max(1, round(rate))
-
-            trade_events = self._execute_trade(agent, best_partner, surplus_item, give_qty, desired_item, recv_qty)
-            events.extend(trade_events)
-
-        # Periodically detect if a currency is emerging
-        if self.tick % 100 == 0:
-            self.economy.detect_currency()
-            if self.economy.currency_item and self.economy.currency_adoption > 0.5:
-                currency_name = self.economy.currency_item.replace("_", " ")
-                if not self.world.constitution.economic_rules.get("currency"):
-                    self.world.constitution.economic_rules["currency"] = currency_name
-                    self.world.constitution.change_history.append({
-                        "tick": self.tick,
-                        "type": "currency_emerged",
-                        "description": f"{currency_name} has become the de facto currency",
-                    })
-                    events.append({
-                        "type": "system_event",
-                        "eventType": "currency_emerged",
-                        "label": "Currency!",
-                        "description": f"The settlers have begun using {currency_name} as a common medium of exchange.",
-                    })
-                    self._add_story_highlight("milestone", f"{currency_name} emerged as currency", None, None)
-
-        return events
-
-    def _resolve_trade_intentions(self) -> list[dict]:
-        """Find matching trade intentions from conversations and execute the swaps."""
-        events = []
-        # Collect all active trade intentions
-        trade_agents: list[tuple[Agent, dict]] = []
-        for agent in self.agents.values():
-            for intention in agent.active_intentions:
-                if intention.get("source") != "trade" or intention.get("status") != "active":
-                    continue
-                trade_agents.append((agent, intention))
-
-        # Try to match pairs that are co-located
-        matched = set()
-        for i, (agent_a, intent_a) in enumerate(trade_agents):
-            if id(intent_a) in matched:
-                continue
-            partner_name = intent_a.get("trade_details", {}).get("partner")
-            if not partner_name:
-                continue
-            # Find the partner's matching intention
-            for j, (agent_b, intent_b) in enumerate(trade_agents):
-                if i == j or id(intent_b) in matched:
-                    continue
-                if agent_b.name != partner_name:
-                    continue
-                if agent_a.current_location != agent_b.current_location:
-                    continue
-                # Both are co-located with matching trade intentions - execute
-                # Parse what each has to offer: give surplus, get what's needed
-                give_item, recv_item = self._pick_trade_items(agent_a, agent_b)
-                if give_item and recv_item:
-                    rate = self.economy.get_suggested_rate(give_item, recv_item, self.time_manager.season)
-                    give_qty = 1
-                    recv_qty = max(1, round(rate))
-                    trade_events = self._execute_trade(agent_a, agent_b, give_item, give_qty, recv_item, recv_qty, context="negotiated")
-                    events.extend(trade_events)
-
-                # Mark intentions as completed
-                intent_a["status"] = "completed"
-                intent_b["status"] = "completed"
-                matched.add(id(intent_a))
-                matched.add(id(intent_b))
-                break
-
-        return events
+        description = (
+            f"{agent.name} tries to exchange {give_qty} {give_label} with {partner.name} "
+            f"for {recv_qty} {recv_label} at {agent.current_location.replace('_', ' ')}."
+        )
+        asyncio.create_task(self._execute_open_ended_action(agent, description))
+        return [{
+            "type": "system_event",
+            "eventType": "exchange_attempt",
+            "label": "Exchange Attempt",
+            "description": description,
+        }]
 
     def _pick_trade_items(self, agent_a: Agent, agent_b: Agent) -> tuple[str | None, str | None]:
         """Pick the best items for a trade between two agents based on needs and surplus."""
@@ -1332,16 +1265,18 @@ class SimulationEngine:
                 agent.working_memory.set_worry(summary)
             repeated = sum(1 for reason in agent.blocked_reasons if category in reason.get("reason", ""))
             if repeated >= 2:
-                agent.active_intentions.insert(0, {
-                    "goal": f"Get unstuck on {category.replace('_', ' ')}",
-                    "why": "I've hit the same obstacle more than once and need a different approach.",
-                    "urgency": 0.66,
-                    "source": "plan_revision",
-                    "target_location": agent.current_location,
-                    "next_step": "ask for help or try a smaller version of the task",
-                    "status": "active",
-                })
-                agent.active_intentions = agent.active_intentions[:8]
+                agent.add_intention(
+                    f"Get unstuck on {category.replace('_', ' ')}",
+                    "I've hit the same obstacle more than once and need a different approach.",
+                    0.66,
+                    "plan_revision",
+                    target_location=agent.current_location,
+                    next_step="ask for help or try a smaller version of the task",
+                    status="active",
+                    created_tick=tick,
+                    expires_after_ticks=180,
+                    refresh_on_relevance=True,
+                )
         for goal in agent.active_goals:
             if goal.get("status") != "active":
                 continue
@@ -1692,7 +1627,7 @@ class SimulationEngine:
         return events
 
     def _check_creative_actions(self) -> list[dict]:
-        """Agents with high openness may create art."""
+        """Agents with high openness sometimes start a creative open-ended action."""
         events: list[dict] = []
         for agent in self.agents.values():
             if agent.current_action.value != "idle" or agent.is_in_conversation:
@@ -1705,109 +1640,13 @@ class SimulationEngine:
             if random.random() > openness * 0.15:
                 continue
 
-            art = {
-                "name": f"artwork_by_{agent.name.split()[0].lower()}_{self.tick}",
-                "type": "art",
-                "created_by": agent.name,
-                "location": agent.current_location,
-                "tick": self.tick,
-            }
-            self.world.created_objects.append(art)
-            agent.skill_memory.record_attempt("art", True, 0.7)
-            agent.emotional_state.apply_event("goal_achieved", 0.4)
-            agent.episodic_memory.add_simple(
-                f"I created something today, a piece of art at the {agent.current_location.replace('_', ' ')}.",
-                tick=self.tick, day=self.time_manager.day,
-                time_of_day=self.time_manager.time_of_day, location=agent.current_location,
-                category="action", intensity=0.6, emotion="proud",
+            description = (
+                f"{agent.name} wants to make something expressive from materials around "
+                f"{agent.current_location.replace('_', ' ')}."
             )
-
-            for other in self.agents.values():
-                if other.id == agent.id:
-                    continue
-                dist = abs(agent.position[0] - other.position[0]) + abs(agent.position[1] - other.position[1])
-                if dist <= 6:
-                    other.episodic_memory.add_simple(
-                        f"I saw {agent.name} creating art at the {agent.current_location.replace('_', ' ')}.",
-                        tick=self.tick, day=self.time_manager.day,
-                        time_of_day=self.time_manager.time_of_day, location=agent.current_location,
-                        category="observation", intensity=0.4, emotion="curious", agents=[agent.name],
-                    )
-                    if other.profile.personality.get("openness", 0.5) > 0.5:
-                        other.emotional_state.apply_event("positive_conversation", 0.2)
-
-            self._add_story_highlight("culture", f"{agent.name} created art at {agent.current_location.replace('_', ' ')}.", agent.id, agent.name)
-            events.append({"type": "system_event", "eventType": "art_created", "label": "Art Created", "description": f"{agent.name} created art at {agent.current_location}"})
-        return events
-
-    def _collect_taxes(self) -> list[dict]:
-        """Collect taxes when a taxation rule exists in the constitution."""
-        from systems.economy import EFFORT_VALUES
-        events: list[dict] = []
-        tax_rule = self.world.constitution.economic_rules.get("taxation")
-        if not tax_rule:
-            return events
-
-        # Try to identify the taxed item from the rule text
-        tax_item = None
-        for item_name in EFFORT_VALUES:
-            if item_name.replace("_", " ") in str(tax_rule).lower():
-                tax_item = item_name
-                break
-        if not tax_item:
-            # Default: tax the most common item
-            counts: dict[str, int] = {}
-            for agent in self.agents.values():
-                for item in agent.inventory:
-                    name = item.get("name", "")
-                    counts[name] = counts.get(name, 0) + int(item.get("quantity", 1))
-            if counts:
-                tax_item = max(counts, key=counts.get)
-        if not tax_item:
-            return events
-
-        tax_rate = 0.1
-        collected = 0
-        leader_name = self.world.constitution.governance_rules.get("informal_leader", "")
-
-        for agent in self.agents.values():
-            qty = agent.inventory_count(tax_item)
-            tax_amount = max(1, int(qty * tax_rate))
-            if qty < tax_amount + 1:
-                continue
-
-            # Tax refusal: low conscientiousness or low trust in leader
-            conscientiousness = agent.profile.personality.get("conscientiousness", 0.5)
-            trust_in_leader = 0.5
-            if leader_name and leader_name in agent.relationships:
-                trust_in_leader = agent.relationships[leader_name].get("trust", 0.5)
-            refuse_chance = max(0, 0.3 - conscientiousness * 0.3 - trust_in_leader * 0.2)
-            if random.random() < refuse_chance:
-                self.world.add_norm_violation({
-                    "tick": self.tick, "agent": agent.name, "norm": "Pay taxes",
-                    "location": agent.current_location,
-                    "description": f"{agent.name} refused to pay the {tax_item.replace('_', ' ')} tax.",
-                })
-                agent.episodic_memory.add_simple(
-                    f"I refused to pay the tax today. Why should I?",
-                    tick=self.tick, day=self.time_manager.day,
-                    time_of_day=self.time_manager.time_of_day, location=agent.current_location,
-                    category="action", intensity=0.5, emotion="defiant",
-                )
-                continue
-
-            if agent.consume_inventory(tax_item, tax_amount):
-                self.world.shared_pool[tax_item] = self.world.shared_pool.get(tax_item, 0) + tax_amount
-                collected += tax_amount
-                agent.episodic_memory.add_simple(
-                    f"Paid {tax_amount} {tax_item.replace('_', ' ')} in taxes.",
-                    tick=self.tick, day=self.time_manager.day,
-                    time_of_day=self.time_manager.time_of_day, location=agent.current_location,
-                    category="action", intensity=0.3, emotion="neutral",
-                )
-
-        if collected > 0:
-            events.append({"type": "system_event", "eventType": "tax_collected", "label": "Taxes Collected", "description": f"{collected} {tax_item.replace('_', ' ')} collected in taxes."})
+            asyncio.create_task(self._execute_open_ended_action(agent, description))
+            self._add_story_highlight("culture", f"{agent.name} started a creative experiment at {agent.current_location.replace('_', ' ')}.", agent.id, agent.name)
+            events.append({"type": "system_event", "eventType": "creative_attempt", "label": "Creative Attempt", "description": f"{agent.name} started making something expressive at {agent.current_location}."})
         return events
 
     # ── End emergent behavior methods ────────────────────────────
@@ -1837,8 +1676,6 @@ class SimulationEngine:
         events.extend(self._process_active_proposals())
         if self.tick % 15 == 0:
             events.extend(self._work_on_projects())
-        if self.tick % 20 == 0:
-            events.extend(self._attempt_barter_trades())
         if self.tick % 10 == 0:
             events.extend(self._apply_social_enforcement())
 
@@ -1855,6 +1692,7 @@ class SimulationEngine:
 
             is_alone = all(other.current_location != agent.current_location for other in self.agents.values() if other.id != agent.id)
             has_home = any(loc.get("claimed_by") == agent.name for loc in self.world.locations.values() if loc.get("type") == "built_structure")
+            num_friends = sum(1 for r in agent.relationships.values() if r.get("trust", 0) > 0.5)
             agent.drives.tick_update(
                 is_working=agent.current_action.value in ("working", "building"),
                 is_sleeping=agent.current_action.value == "sleeping",
@@ -1862,10 +1700,18 @@ class SimulationEngine:
                 is_socializing=agent.current_action.value == "talking",
                 wealth=0,
                 has_home=has_home,
+                num_friends=num_friends,
             )
+            # Weather/season affect energy drain
+            energy_mod = self.world.get_energy_drain_modifier()
+            if energy_mod > 1.0:
+                extra = (energy_mod - 1.0) * 0.002
+                agent.drives.rest = min(1.0, agent.drives.rest + extra)
+                agent.drives.hunger = min(1.0, agent.drives.hunger + extra * 0.5)
 
             if agent.current_action.value == "eating":
                 agent.drives.satisfy_hunger()
+                agent.drives.satisfy_thirst()
             agent.emotional_state.decay(1)
             # Keep sickness in the agent's conscious awareness
             if agent.is_sick and self.tick % 20 == 0:
@@ -1904,7 +1750,9 @@ class SimulationEngine:
                     })
 
                 if action == "walking" and target != agent.current_location:
-                    agent.start_walking(target)
+                    from systems.interactions import avoidance_system
+                    avoid_pos = avoidance_system.get_avoidance_positions(agent, self.agents)
+                    agent.start_walking(target, avoidance_targets=avoid_pos if avoid_pos else None)
                     events.append({"type": "agent_move", "agentId": agent.id, "targetLocation": target})
                 elif action == "eating":
                     ate_event = self._handle_eating(agent)
@@ -1912,7 +1760,9 @@ class SimulationEngine:
                         events.append(ate_event)
                 elif action == "sleeping":
                     if target != agent.current_location:
-                        agent.start_walking(target)
+                        from systems.interactions import avoidance_system as _avoid
+                        _avoid_pos = _avoid.get_avoidance_positions(agent, self.agents)
+                        agent.start_walking(target, avoidance_targets=_avoid_pos if _avoid_pos else None)
                         agent.inner_thought = f"I should get back to {target.replace('_', ' ')} and sleep there."
                         events.append({"type": "agent_move", "agentId": agent.id, "targetLocation": target})
                     else:
@@ -1947,7 +1797,7 @@ class SimulationEngine:
                         continue
                     dist = abs(agent.position[0] - other.position[0]) + abs(agent.position[1] - other.position[1])
                     if dist <= VISUAL_RANGE:
-                        obs = observation_system.generate_observation(agent, other, dist)
+                        obs = observation_system.generate_observation(agent, other, dist, tick=self.tick)
                         if obs:
                             agent.working_memory.latest_observation = obs
 
@@ -1963,8 +1813,11 @@ class SimulationEngine:
             asyncio.create_task(self._run_daily_evening())
             asyncio.create_task(self._generate_day_recap(day))
 
+        # Per-agent novelty-driven decisions every 10 ticks
+        if self.tick % 10 == 0:
+            asyncio.create_task(self._process_novelty_decisions())
+
         if self.tick % 30 == 0:
-            asyncio.create_task(self._process_novel_action())
             events.extend(self._check_desperation_actions())
 
         if self.tick % 50 == 0:
@@ -1973,17 +1826,42 @@ class SimulationEngine:
         if self.tick % 80 == 0:
             events.extend(self._check_creative_actions())
 
+        # Pattern detection every 50 ticks
+        if self.tick % 50 == 0:
+            from systems.pattern_detector import pattern_detector
+            pattern_events = pattern_detector.check(self.agents, self.world, self.tick, self.time_manager.day)
+            events.extend(pattern_events)
+            for event in pattern_events:
+                description = event.get("description", "")
+                self._record_timeline_event(
+                    "pattern_detected",
+                    event.get("label", "Pattern Detected"),
+                    description,
+                    [],
+                )
+                if self._broadcast:
+                    asyncio.create_task(self._broadcast_message("pattern_event", {
+                        "type": "social" if "gather" in description.lower() else "norm" if "norm" in description.lower() else "social",
+                        "name": event.get("label", "Pattern"),
+                        "description": description,
+                        "emerged_on": self.time_manager.day,
+                    }))
+                    asyncio.create_task(self._broadcast_message("timeline_event", self._serialize_timeline_events()[-1]))
+
         if self.tick % 100 == 0:
             from systems.meta_simulation import meta_simulation
             events.extend(meta_simulation.check(self.agents, self.world, self.tick, self.time_manager.day))
 
+        # Sync weather/season to world and decay objects
+        if self.tick % 50 == 0:
+            self.world.update_weather_season(self.time_manager.weather, self.time_manager.season)
+            object_delta = self.world.decay_all_objects(self.time_manager.weather)
+            if self._broadcast and any(object_delta.values()):
+                asyncio.create_task(self._broadcast_message("world_object_delta", object_delta))
+
         if self.tick % 200 == 0:
             from systems.coherence import coherence_checker
             coherence_checker.check(self.agents, self.world)
-
-        # Collect taxes once per day at noon
-        if self.time_manager.tick_in_day == self.time_manager.ticks_per_day // 2:
-            events.extend(self._collect_taxes())
 
         return events
 
@@ -2013,6 +1891,10 @@ class SimulationEngine:
     def _gather_resource_for_agent(self, agent, resource: str) -> dict | None:
         skill_level = agent.skill_memory.activities.get("gathering", {}).get("skill_level", 0.0)
         amount = 1 + (1 if skill_level >= 0.3 else 0) + (1 if skill_level >= 0.7 else 0)
+        # Apply season modifier to gathering yield
+        season_mod = self.world.get_season_resource_modifier(resource)
+        weather_mod = self.world.get_weather_modifier("gathering")
+        amount = max(1, int(amount * season_mod * weather_mod))
         gathered = self.world.gather_resource(resource, amount, agent.current_location)
         if gathered <= 0:
             agent.current_action = ActionType.IDLE
@@ -2027,9 +1909,19 @@ class SimulationEngine:
         self._advance_current_plan(agent, "completed", f"Gathered {resource.replace('_', ' ')}.")
         self._note_plan_outcome(agent, True, resource, f"I gathered {resource.replace('_', ' ')} and made progress.")
         self._world_state_dirty = True
+        from systems.pattern_detector import pattern_detector
+        pattern_detector.record_action(agent.name, {
+            "type": "gathering", "location": agent.current_location, "resource": resource,
+        }, self.tick)
         return {"type": "agent_action", "agentId": agent.id, "action": "working", "targetLocation": agent.current_location}
 
     def _build_shelter(self, agent, label: str | None = None, purpose: str = "shelter") -> dict | None:
+        # Weather check: building in storm is nearly impossible
+        build_mod = self.world.get_weather_modifier("building")
+        if build_mod < 0.3 and random.random() > build_mod:
+            agent.inner_thought = "The weather is too bad to build right now."
+            self._note_plan_outcome(agent, False, "building", "Weather prevented building.")
+            return None
         if agent.inventory_count("wood") < 5:
             agent.inner_thought = "I still need more wood before I can build."
             self._advance_current_plan(agent, "blocked", "Not enough wood to build.")
@@ -2058,6 +1950,10 @@ class SimulationEngine:
         self._note_plan_outcome(agent, True, "building", f"I built {label or 'a shelter'} and it changes what tomorrow looks like.")
         self._world_state_dirty = True
         self._add_story_highlight("achievement", f"{agent.name} built: {label or 'a shelter'}", agent.id, agent.name)
+        from systems.pattern_detector import pattern_detector
+        pattern_detector.record_action(agent.name, {
+            "type": "building", "location": agent.current_location, "label": label or "shelter",
+        }, self.tick)
         return {"type": "system_event", "eventType": "building_constructed", "label": "Construction", "description": f"{agent.name} built {label or 'a shelter'}"}
 
     def _execute_commitments(self) -> list[dict]:
@@ -2128,20 +2024,13 @@ class SimulationEngine:
                 self._note_plan_outcome(agent, False, "commitment", "I let a building promise slip because I wasn't ready.")
                 events.append({"type": "system_event", "eventType": "plan_failed", "label": "Missed Plan", "description": f"{agent.name} could not follow through on the building plan."})
         elif kind in ("barter_offer", "offer"):
-            # Find the trade partner and try to execute
             partner_names = commitment.get("with", [])
             partner = next((a for a in self.agents.values() if a.name in partner_names and a.current_location == location), None)
             if partner:
-                give_item, recv_item = self._pick_trade_items(agent, partner)
-                if give_item and recv_item:
-                    rate = self.economy.get_suggested_rate(give_item, recv_item, self.time_manager.season)
-                    trade_events = self._execute_trade(agent, partner, give_item, 1, recv_item, max(1, round(rate)), context="negotiated")
-                    events.extend(trade_events)
-                    commitment["status"] = "completed"
-                    self._note_plan_outcome(agent, True, "trade", f"Completed a trade with {partner.name}.")
-                else:
-                    commitment["status"] = "failed"
-                    self._note_plan_outcome(agent, False, "trade", "We couldn't find a good trade to make.")
+                commitment["status"] = "completed"
+                description = commitment.get("description") or f"{agent.name} tries to work out an exchange with {partner.name} at {location.replace('_', ' ')}."
+                asyncio.create_task(self._execute_open_ended_action(agent, description))
+                self._note_plan_outcome(agent, True, "exchange", f"Tried to work out an exchange with {partner.name}.")
             else:
                 # Partner isn't here yet, keep waiting
                 pass
@@ -2349,6 +2238,7 @@ class SimulationEngine:
                 others = [p.name for p in final_participants if p.id != agent.id]
                 if others:
                     process_conversation_consequences(agent, others, convo, tick=self.tick, day=self.time_manager.day, all_agent_names=all_names)
+            await self._synthesize_conversation_models(convo, final_participants)
             if convo.structured_commitments:
                 description = convo.structured_commitments[-1]["description"]
                 self._add_story_highlight("new_goal", f"{final_participants[0].name} wants to: {description}", final_participants[0].id, final_participants[0].name)
@@ -2363,15 +2253,16 @@ class SimulationEngine:
             self._live_conversations.pop(convo.id, None)
 
     async def _process_inner_monologue_background(self):
+        """Per-agent inner monologue. Each agent thinks every 3-5 ticks (staggered)."""
         try:
-            agents_list = list(self.agents.values())
-            if not agents_list:
-                return
-            agent = random.choice(agents_list)
-            from agents.cognition.inner_monologue import generate_thought
-            thought = await generate_thought(agent, agent.current_location, self.time_manager.time_of_day, agent.current_action.value)
-            if thought and self._broadcast:
-                await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": [{"type": "agent_thought", "agentId": agent.id, "thought": thought}], "agents": [a.to_dict() for a in self.agents.values()]}})
+            from agents.cognition.inner_monologue import process_agent_thought
+            thought_events = []
+            for agent in list(self.agents.values()):
+                thought = await process_agent_thought(agent, self.tick, self.time_manager.time_of_day)
+                if thought:
+                    thought_events.append({"type": "agent_thought", "agentId": agent.id, "thought": thought})
+            if thought_events and self._broadcast:
+                await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": thought_events, "agents": [a.to_dict() for a in self.agents.values()]}})
         except Exception as e:
             logger.error("Inner monologue error: %s", e)
 
@@ -2406,23 +2297,191 @@ class SimulationEngine:
         self.day_recaps.append({"day": day, "summary": " ".join(top_events[:3]), "tick": self.tick})
         self.day_recaps = self.day_recaps[-30:]
 
-    async def _process_novel_action(self):
-        from systems.action_interpreter import ActionInterpreter
-        idle_agents = [a for a in self.agents.values() if a.current_action.value == "idle" and not a.path and not getattr(a, "is_in_conversation", False)]
-        if not idle_agents:
+    def _serialize_world_objects(self) -> list[dict]:
+        return [obj.to_dict() for obj in self.world.world_objects.values()]
+
+    def _serialize_innovations(self) -> list[dict]:
+        return list(self.world.innovation_registry[-100:])
+
+    def _serialize_patterns(self) -> list[dict]:
+        patterns = getattr(self.world.constitution, "detected_patterns", [])
+        return [
+            {
+                "type": pattern.get("category", "social"),
+                "name": pattern.get("name", pattern.get("text", "Pattern")),
+                "description": pattern.get("description", ""),
+                "emerged_on": pattern.get("emerged_on", 0),
+            }
+            for pattern in patterns[-100:]
+        ]
+
+    def _serialize_timeline_events(self) -> list[dict]:
+        return [
+            {
+                "tick": entry.get("tick", 0),
+                "day": entry.get("day", self.time_manager.day),
+                "type": entry.get("type", "world_event"),
+                "title": entry.get("title", entry.get("type", "World Event").replace("_", " ").title()),
+                "description": entry.get("description", ""),
+                "agents_involved": entry.get("agents_involved", []),
+            }
+            for entry in self.world.constitution.change_history[-200:]
+        ]
+
+    async def _broadcast_message(self, message_type: str, data: dict):
+        if not self._broadcast:
             return
-        agent = random.choice(idle_agents)
-        try:
-            drive_desc = agent.drives.get_prompt_description()
-            action_desc = f"{agent.name} wants to do something useful. {drive_desc} They are at {agent.current_location}."
-            interpreter = ActionInterpreter()
-            result = await interpreter.evaluate_action(agent, action_desc, self.world)
-            if result.get("is_possible") and result.get("success_probability", 0) > 0.3:
-                events = interpreter.apply_consequences(agent, result, self.world)
-                if events and self._broadcast:
-                    await self._broadcast({"type": "tick", "data": {"tick": self.tick, "time": self.time_manager.to_dict(), "events": events, "agents": [a.to_dict() for a in self.agents.values()]}})
-        except Exception as e:
-            logger.error("Novel action error for %s: %s", agent.name, e)
+        await self._broadcast({"type": message_type, "data": data})
+
+    def _record_timeline_event(self, event_type: str, title: str, description: str, agents_involved: list[str] | None = None):
+        self.world.constitution.change_history.append({
+            "tick": self.tick,
+            "day": self.time_manager.day,
+            "type": event_type,
+            "title": title,
+            "description": description,
+            "agents_involved": agents_involved or [],
+        })
+        self.world.constitution.change_history = self.world.constitution.change_history[-200:]
+
+    def _make_action_result_event(self, agent: Agent, action_desc: str, result) -> dict:
+        outcome_desc = getattr(result.outcome, "description", "") or result.evaluation.why_not or "No visible outcome"
+        objects_created = []
+        if getattr(result.success, "__bool__", lambda: bool(result.success))():
+            objects_created = [obj.name for obj in getattr(result.outcome, "objects_created", [])]
+        return {
+            "agent_name": agent.name,
+            "action_description": action_desc,
+            "success": result.success,
+            "outcome_description": outcome_desc,
+            "objects_created": objects_created,
+            "tick": self.tick,
+        }
+
+    def _record_innovation_from_result(self, agent: Agent, action_desc: str, result) -> dict | None:
+        if not result.success:
+            return None
+        objects_created = getattr(result.outcome, "objects_created", [])
+        if not objects_created and not result.evaluation.unlocks:
+            return None
+
+        primary_name = objects_created[0].name if objects_created else action_desc[:80]
+        key = f"{primary_name.lower()}::{result.intent.description[:80].lower()}"
+        existing = next((entry for entry in self.world.innovation_registry if entry.get("key") == key), None)
+        if existing:
+            if agent.name != existing.get("inventor") and agent.name not in existing.get("adopters", []):
+                existing.setdefault("adopters", []).append(agent.name)
+                existing["adoption_rate"] = round(len(existing["adopters"]) / max(len(self.agents), 1), 3)
+            return existing
+
+        innovation = {
+            "id": f"innovation_{len(self.world.innovation_registry) + 1}",
+            "key": key,
+            "name": primary_name,
+            "description": getattr(result.outcome, "description", action_desc),
+            "inventor": agent.name,
+            "invented_on": self.tick,
+            "adoption_rate": 0.0,
+            "adopters": [],
+            "parent_id": None,
+        }
+        self.world.innovation_registry.append(innovation)
+        self.world.innovation_registry = self.world.innovation_registry[-100:]
+        return innovation
+
+    async def _execute_open_ended_action(self, agent: Agent, action_desc: str):
+        from systems.action_interpreter import ActionInterpreter
+        from systems.consequence_engine import consequence_engine
+        from systems.pattern_detector import pattern_detector
+
+        interpreter = ActionInterpreter()
+        interpreter._agents = self.agents
+        before_objects = {
+            obj_id: obj.to_dict()
+            for obj_id, obj in self.world.world_objects.items()
+        }
+
+        result = await interpreter.evaluate_action(agent, action_desc, self.world)
+        result.tick_completed = self.tick
+
+        if result.evaluation.feasible:
+            consequence_engine.apply(
+                result,
+                agent,
+                self.world,
+                self.agents,
+                tick=self.tick,
+                day=self.time_manager.day,
+            )
+
+        after_ids = set(self.world.world_objects.keys())
+        before_ids = set(before_objects.keys())
+        created = [self.world.world_objects[obj_id].to_dict() for obj_id in sorted(after_ids - before_ids)]
+        updated = [
+            self.world.world_objects[obj_id].to_dict()
+            for obj_id in sorted(after_ids & before_ids)
+            if self.world.world_objects[obj_id].to_dict() != before_objects[obj_id]
+        ]
+
+        outcome = result.outcome
+        pattern_type = getattr(outcome, "skill_practiced", "") or (
+            getattr(outcome, "objects_created", [None])[0].category
+            if getattr(outcome, "objects_created", None)
+            else "deliberate_action"
+        )
+        pattern_detector.record_action(agent.name, {
+            "type": pattern_type,
+            "location": agent.current_location,
+            "description": result.intent.description,
+        }, self.tick)
+
+        action_event = self._make_action_result_event(agent, action_desc, result)
+        timeline_title = "Action Succeeded" if result.success else "Action Failed"
+        self._record_timeline_event(
+            "action_result",
+            timeline_title,
+            f"{agent.name}: {action_event['outcome_description']}",
+            [agent.name],
+        )
+        innovation = self._record_innovation_from_result(agent, action_desc, result)
+        if innovation and innovation.get("inventor") == agent.name and not innovation.get("adopters"):
+            self._record_timeline_event(
+                "innovation",
+                "Innovation",
+                f"{agent.name} introduced {innovation['name']}.",
+                [agent.name],
+            )
+        self._world_state_dirty = True
+
+        if created or updated:
+            await self._broadcast_message("world_object_delta", {
+                "created": created,
+                "updated": updated,
+                "destroyed": [],
+            })
+        await self._broadcast_message("action_result", action_event)
+        if innovation:
+            await self._broadcast_message("innovation_event", innovation)
+        await self._broadcast_message("timeline_event", self._serialize_timeline_events()[-1])
+
+    async def _process_novelty_decisions(self):
+        from agents.cognition.decision import decide
+
+        world_state = {
+            "agents": self.agents,
+            "hour": self.time_manager.hour,
+            "time_of_day": self.time_manager.time_of_day,
+        }
+
+        for agent in list(self.agents.values()):
+            try:
+                action_desc = await decide(agent, world_state, self.tick)
+                if not action_desc:
+                    continue
+
+                await self._execute_open_ended_action(agent, action_desc)
+            except Exception as e:
+                logger.error("Novelty decision error for %s: %s", agent.name, e)
 
     def get_world_state(self) -> dict:
         return {
@@ -2431,10 +2490,13 @@ class SimulationEngine:
             "agents": [a.to_dict() for a in self.agents.values()],
             "weather": self.time_manager.weather,
             "speed": self.speed,
-            "economy": self.economy.to_dict(),
             "buildings": self.world.get_buildings_list(),
             "tileGrid": self.world.get_tile_grid(),
             "worldSummary": self.world.get_world_summary(),
+            "worldObjects": self._serialize_world_objects(),
+            "innovations": self._serialize_innovations(),
+            "patterns": self._serialize_patterns(),
+            "timelineEvents": self._serialize_timeline_events(),
         }
 
     def get_agent_detail(self, agent_id: str) -> dict:
@@ -2448,7 +2510,6 @@ class SimulationEngine:
             "tick": self.tick,
             "time": self.time_manager.to_dict(),
             "agents": [a.to_detail_dict() for a in self.agents.values()],
-            "economy": self.economy.to_dict(),
             "constitution": self.world.constitution.to_dict(),
             "storyHighlights": self.story_highlights[-50:],
             "dayRecaps": self.day_recaps[-30:],
@@ -2460,11 +2521,10 @@ class SimulationEngine:
             "normViolations": self.world.norm_violations[-40:],
             "institutions": self.world.constitution.institutions[-20:],
             "projects": self.world.projects[-20:],
-            "trades": self.world.trades[-40:],
-            "leadership": {
-                "informalLeader": self.world.constitution.governance_rules.get("informal_leader"),
-                "scores": self.world.constitution.governance_rules.get("leadership_scores", {}),
-            },
+            "patterns": self._serialize_patterns(),
+            "innovations": self._serialize_innovations(),
+            "timelineEvents": self._serialize_timeline_events(),
+            "worldObjects": self._serialize_world_objects(),
             "worldSummary": self.world.get_world_summary(),
             "debugEvents": self.debug_events[-30:],
             "townStats": {

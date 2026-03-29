@@ -95,6 +95,29 @@ class InteractionNormalizationTests(unittest.TestCase):
         self.assertGreater(model.alliance_lean, 0.0)
         self.assertTrue(any(intent.get("source") == "support" for intent in speaker.active_intentions))
 
+    def test_proposal_creates_intentions_not_long_term_goals(self):
+        world = World()
+        speaker = Agent(AGENT_PROFILES[0], world)
+        convo = SimpleNamespace(
+            interaction_type="planning",
+            location="clearing",
+            turns=[{"speaker": "John Harlow", "speech": "We should organize watch shifts.", "trust_shift": "up"}],
+            structured_commitments=[],
+            structured_proposals=[{
+                "description": "Organize watch shifts around the clearing fire",
+                "participants": [speaker.name, "John Harlow"],
+                "location": "clearing",
+            }],
+        )
+
+        process_conversation_consequences(speaker, "John Harlow", convo, tick=25, day=2)
+
+        self.assertEqual(speaker.active_goals, [])
+        proposal_intents = [intent for intent in speaker.active_intentions if intent.get("source", "").startswith("proposal")]
+        self.assertGreaterEqual(len(proposal_intents), 2)
+        self.assertTrue(all("expires_after_ticks" in intent for intent in proposal_intents))
+        self.assertTrue(any(intent.get("source") == "proposal_consideration" for intent in proposal_intents))
+
 
 if __name__ == "__main__":
     unittest.main()

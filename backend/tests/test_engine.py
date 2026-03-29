@@ -221,27 +221,6 @@ class EnginePlanningTests(unittest.TestCase):
         self.assertTrue(any(project["name"] == "Communal Fire" for project in self.engine.world.projects))
         self.assertTrue(any(event["eventType"] == "project_started" for event in events))
 
-    def test_barter_trade_records_trade_and_updates_reciprocity(self):
-        agents = list(self.engine.agents.values())[:2]
-        hungry, partner = agents
-        hungry.current_location = "clearing"
-        partner.current_location = "clearing"
-        hungry.position = self.engine.world.get_location_entry("clearing")
-        partner.position = self.engine.world.get_location_entry("clearing")
-        hungry.drives.hunger = 0.9
-        hungry.drives.shelter_need = 0.2
-        hungry.inventory = [{"name": "wood", "quantity": 2}]
-        partner.inventory = [{"name": "wild_berries", "quantity": 2}]
-        hungry.relationships[partner.name] = {"sentiment": 0.7, "trust": 0.8, "familiarity": 0.6}
-        partner.relationships[hungry.name] = {"sentiment": 0.7, "trust": 0.8, "familiarity": 0.6}
-
-        events = self.engine._attempt_barter_trades()
-
-        self.assertTrue(any(event["eventType"] == "barter_trade" for event in events if event["type"] == "system_event"))
-        self.assertEqual(len(self.engine.world.trades), 1)
-        self.assertIn(partner.name, hungry.reciprocity_ledger)
-        self.assertGreaterEqual(hungry.inventory_count("wild_berries"), 1)
-
     def test_institution_upkeep_assigns_roles_and_schedules_meeting(self):
         agents = list(self.engine.agents.values())[:3]
         institution = {
@@ -285,6 +264,14 @@ class EnginePlanningTests(unittest.TestCase):
 
         self.assertTrue(any(conflict.get("with") == other.name for conflict in agent.active_conflicts))
         self.assertTrue(any(event["eventType"] == "commitment_missed" for event in events))
+
+    def test_world_state_exposes_open_action_state(self):
+        state = self.engine.get_world_state()
+
+        self.assertIn("worldObjects", state)
+        self.assertIn("innovations", state)
+        self.assertIn("patterns", state)
+        self.assertIn("timelineEvents", state)
 
 
 if __name__ == "__main__":
