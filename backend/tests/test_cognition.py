@@ -30,6 +30,7 @@ from agents.cognition.emotions import EmotionalState
 from agents.agent import Agent
 from agents.profiles import AGENT_PROFILES
 from simulation.world import World
+from systems.open_action_models import WorldObject
 
 
 class TestDrivesDecay(unittest.TestCase):
@@ -221,6 +222,24 @@ class TestIntentionLifecycle(unittest.TestCase):
         self.assertEqual(len(agent.active_intentions), 1)
         self.assertEqual(agent.active_intentions[0]["created_tick"], 40)
         self.assertLess(agent.active_intentions[0]["urgency"], 0.8)
+
+
+class TestObjectBackedHome(unittest.TestCase):
+    def test_find_home_from_object_memory(self):
+        world = World()
+        agent = Agent(AGENT_PROFILES[0], world)
+        shelter = WorldObject(
+            id="obj_home",
+            name="Reed Lean-To",
+            description="A quick lean-to",
+            category="structure",
+            portable=False,
+            owner=agent.name,
+            location="clearing",
+            object_memory="This lean-to has become a dry place to sleep under.",
+        )
+        world.world_objects[shelter.id] = shelter
+        self.assertEqual(agent._find_home(), "clearing")
 
 
 class TestSkills(unittest.TestCase):

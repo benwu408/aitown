@@ -231,6 +231,7 @@ class SimulationEngine:
             agent.active_goals = saved.get("active_goals", [])
             agent.social_commitments = saved.get("social_commitments", [])
             agent.inventory = saved.get("inventory", [])
+            agent.held_object_id = saved.get("held_object_id")
             agent.secrets = saved.get("secrets", [])
             agent.opinions = saved.get("opinions", {})
 
@@ -239,6 +240,7 @@ class SimulationEngine:
             agent.is_sick = saved.get("is_sick", False)
             agent.sick_since_tick = saved.get("sick_since_tick", 0)
             agent.last_steal_attempt_tick = saved.get("last_steal_attempt_tick", -999)
+            agent.reconcile_held_object()
             self._migrate_goal_hierarchy(agent, saved)
 
         for agent in self.agents.values():
@@ -1766,6 +1768,14 @@ class SimulationEngine:
                         agent.inner_thought = f"I should get back to {target.replace('_', ' ')} and sleep there."
                         events.append({"type": "agent_move", "agentId": agent.id, "targetLocation": target})
                     else:
+                        sleep_obj = self._find_sleep_support_object(agent)
+                        if sleep_obj:
+                            agent.drives.satisfy_shelter()
+                            sleep_obj.usage_history.append(f"{agent.name} slept using this at tick {self.tick}.")
+                            sleep_obj.usage_history = sleep_obj.usage_history[-12:]
+                            if not sleep_obj.object_memory:
+                                sleep_obj.object_memory = f"This has served as a sleeping place for {agent.name}."
+                            self._world_state_dirty = True
                         agent.start_sleeping_until(self._next_morning_tick(agent.wake_hour))
                 elif action == "gathering_wood":
                     gather_event = self._gather_resource_for_agent(agent, "wood")
@@ -1776,9 +1786,15 @@ class SimulationEngine:
                     if gather_event:
                         events.append(gather_event)
                 elif action == "building":
-                    build_event = self._build_shelter(agent)
-                    if build_event:
-                        events.append(build_event)
+                    description = self._describe_open_build_attempt(agent)
+                    asyncio.create_task(self._execute_open_ended_action(agent, description))
+                    agent.current_action = ActionType.BUILDING
+                    events.append({
+                        "type": "system_event",
+                        "eventType": "construction_started",
+                        "label": "Construction",
+                        "description": f"{agent.name} starts trying to build something useful.",
+                    })
                 elif action == "working":
                     agent.current_action = ActionType.WORKING
 
@@ -1956,6 +1972,35 @@ class SimulationEngine:
         }, self.tick)
         return {"type": "system_event", "eventType": "building_constructed", "label": "Construction", "description": f"{agent.name} built {label or 'a shelter'}"}
 
+    def _describe_open_build_attempt(self, agent: Agent) -> str:
+        if agent.inventory_count("wood") >= 5 and agent.drives.shelter_need > 0.55:
+            return (
+                f"{agent.name} tries to build some kind of sleeping shelter or weather cover at "
+                f"{agent.current_location.replace('_', ' ')} using the wood they have, making whatever seems physically plausible."
+            )
+        if agent.inventory_count("wood") >= 2:
+            return (
+                f"{agent.name} tries to build or assemble something useful from the materials they are carrying at "
+                f"{agent.current_location.replace('_', ' ')}."
+            )
+        return (
+            f"{agent.name} experiments with arranging nearby materials at "
+            f"{agent.current_location.replace('_', ' ')} into something useful."
+        )
+
+    def _find_sleep_support_object(self, agent: Agent):
+        for obj in self.world.get_objects_by_owner(agent.name):
+            if obj.location != agent.current_location:
+                continue
+            memory = f"{obj.name} {obj.description} {obj.object_memory}".lower()
+            if any(word in memory for word in ("sleep", "shelter", "lean-to", "roof", "bed", "rest", "cover")):
+                return obj
+        for obj in self.world.get_objects_at(agent.current_location):
+            memory = f"{obj.name} {obj.description} {obj.object_memory}".lower()
+            if any(word in memory for word in ("sleep", "shelter", "lean-to", "roof", "bed", "rest", "cover")):
+                return obj
+        return None
+
     def _execute_commitments(self) -> list[dict]:
         events = []
         for agent in self.agents.values():
@@ -2013,16 +2058,11 @@ class SimulationEngine:
                 events.append(gathered)
                 events.append({"type": "system_event", "eventType": "plan_followthrough", "label": "Gathering Plan", "description": f"{agent.name} carried out a plan to gather {resource.replace('_', ' ')}."})
         elif kind == "decision_to_build":
-            build_event = self._build_shelter(agent, label=f"{agent.name.split()[0]}'s Build", purpose="planned_build")
-            if build_event:
-                commitment["status"] = "completed"
-                events.append(build_event)
-            else:
-                commitment["status"] = "failed"
-                agent.emotional_state.apply_event("negative_conversation", 0.2)
-                agent.working_memory.set_worry("I couldn't follow through on that building plan.")
-                self._note_plan_outcome(agent, False, "commitment", "I let a building promise slip because I wasn't ready.")
-                events.append({"type": "system_event", "eventType": "plan_failed", "label": "Missed Plan", "description": f"{agent.name} could not follow through on the building plan."})
+            commitment["status"] = "completed"
+            description = commitment.get("description") or self._describe_open_build_attempt(agent)
+            asyncio.create_task(self._execute_open_ended_action(agent, description))
+            self._note_plan_outcome(agent, True, "building", f"I followed through on building work: {description[:80]}")
+            events.append({"type": "system_event", "eventType": "construction_started", "label": "Construction", "description": f"{agent.name} starts working on: {description}"})
         elif kind in ("barter_offer", "offer"):
             partner_names = commitment.get("with", [])
             partner = next((a for a in self.agents.values() if a.name in partner_names and a.current_location == location), None)
@@ -2392,6 +2432,7 @@ class SimulationEngine:
     async def _execute_open_ended_action(self, agent: Agent, action_desc: str):
         from systems.action_interpreter import ActionInterpreter
         from systems.consequence_engine import consequence_engine
+        from systems.object_visuals import ensure_object_visual
         from systems.pattern_detector import pattern_detector
 
         interpreter = ActionInterpreter()
@@ -2413,6 +2454,11 @@ class SimulationEngine:
                 tick=self.tick,
                 day=self.time_manager.day,
             )
+
+        for obj in self.world.world_objects.values():
+            if not obj.pixel_spec:
+                await ensure_object_visual(self.world, obj)
+        agent.reconcile_held_object()
 
         after_ids = set(self.world.world_objects.keys())
         before_ids = set(before_objects.keys())

@@ -61,6 +61,7 @@ class _FakeAgent:
         self.long_term_goals = []
         self.active_goals = []
         self.active_intentions = []
+        self.held_object_id = None
         self.is_in_conversation = False
         self.is_sick = False
         self.health = 1.0
@@ -82,6 +83,11 @@ class _FakeAgent:
 
     def prune_expired_intentions(self, current_tick):
         return None
+
+    def get_held_object(self):
+        if not self.held_object_id:
+            return None
+        return next((item for item in getattr(self, "_held_objects", []) if item.id == self.held_object_id), None)
 
 
 class TestNoveltyDetectorNoNovelty(unittest.TestCase):
@@ -182,6 +188,9 @@ class TestDecisionPromptConstructor(unittest.TestCase):
         model.what_i_think_they_think_of_me = "suspicious and withholding"
         model.predicted_behaviors = ["question me if I approach too casually"]
         model.perceived_personality = "proud and observant"
+        held = types.SimpleNamespace(id="obj_spear", name="Wooden Spear")
+        agent._held_objects = [held]
+        agent.held_object_id = held.id
 
         other = _FakeAgent()
         other.id = "other"
@@ -204,6 +213,7 @@ class TestDecisionPromptConstructor(unittest.TestCase):
         self.assertIn("Talk to John about the missing food", prompt)
         self.assertIn("suspicious and withholding", prompt)
         self.assertIn("gut=-0.2", prompt)
+        self.assertIn("Wooden Spear", prompt)
         self.assertIn("find water", prompt)
         # Should contain drives info (might say "hungry" or "starving")
         self.assertTrue("hungry" in prompt.lower() or "starving" in prompt.lower())

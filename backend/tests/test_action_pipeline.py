@@ -22,7 +22,7 @@ import unittest
 from systems.open_action_models import (
     ActionIntent, ActionEvaluation, ActionResult,
     SuccessOutcome, FailureOutcome, ObjectSpec,
-    WorldObject, Observability, WorldChange,
+    WorldObject, Observability, WorldChange, ObjectMutation,
 )
 from systems.consequence_engine import ConsequenceEngine
 from systems.pattern_detector import PatternDetector
@@ -42,6 +42,7 @@ class _StubAgent:
         self.id = f"agent_{name.lower()}"
         self.name = name
         self.current_location = location
+        self.world = None
         self.health = 1.0
         self.inventory = []
         self.drives = DriveSystem()
@@ -51,6 +52,7 @@ class _StubAgent:
         self.world_model = WorldModelMemory()
         self.emotional_state = EmotionalState()
         self.is_sick = False
+        self.held_object_id = None
 
     def consume_inventory(self, resource, amount):
         for item in self.inventory:
@@ -59,6 +61,44 @@ class _StubAgent:
                     item["quantity"] -= amount
                     return True
         return False
+
+    def inventory_count(self, resource):
+        total = 0.0
+        for item in self.inventory:
+            if item.get("name") == resource:
+                total += float(item.get("quantity", 0) or 0)
+        return total
+
+    def set_held_object(self, object_id):
+        self.held_object_id = object_id
+
+    def get_held_object(self):
+        if not self.held_object_id:
+            return None
+        return getattr(self, "_held_object", None)
+
+    def reconcile_held_object(self):
+        return None
+
+    def remove_inventory_amount(self, resource, amount):
+        remaining = float(amount)
+        for item in list(self.inventory):
+            if item.get("name") != resource:
+                continue
+            qty = float(item.get("quantity", 0) or 0)
+            take = min(qty, remaining)
+            remaining -= take
+            left = round(qty - take, 2)
+            if left > 1e-6:
+                item["quantity"] = left
+            else:
+                self.inventory.remove(item)
+            if remaining <= 0:
+                return True
+        return False
+
+    def add_inventory_item(self, name, quantity=1.0, extra=None):
+        self.inventory.append({"name": name, "quantity": quantity, **(extra or {})})
 
 
 class TestActionModels(unittest.TestCase):
@@ -127,6 +167,7 @@ class TestConsequenceEngineSuccess(unittest.TestCase):
         self.assertGreater(len(world.world_objects), 0)
         # Agent should have it in inventory (portable)
         self.assertTrue(any(i["name"] == "Wooden Spear" for i in agent.inventory))
+        self.assertIsNotNone(agent.held_object_id)
         # Skill should be recorded
         self.assertGreater(agent.skill_memory.get_skill_level("crafting"), 0.0)
 
@@ -159,6 +200,45 @@ class TestConsequenceEngineFailure(unittest.TestCase):
         entry = agent.skill_memory.activities.get("building")
         self.assertIsNotNone(entry)
         self.assertGreater(entry["failures"], 0)
+
+
+class TestConsequenceEngineObjectMutations(unittest.TestCase):
+    def test_object_mutation_moves_inventory_into_container(self):
+        engine = ConsequenceEngine()
+        world = World()
+        agent = _StubAgent("Alice")
+        basket = WorldObject(
+            id="obj_basket",
+            name="Woven Basket",
+            description="A rough basket",
+            category="container",
+            owner="Alice",
+            object_memory="This has carried berries before.",
+        )
+        world.world_objects[basket.id] = basket
+        agent.inventory.append({"name": "dew-heavy berries", "quantity": 1.0})
+        agent.inventory.append({"name": "Woven Basket", "quantity": 1.0, "object_id": basket.id, "category": "container"})
+        agent.held_object_id = basket.id
+        agent._held_object = basket
+
+        intent = ActionIntent(agent_name="Alice", description="Put the berries into the basket", tick_started=10)
+        evaluation = ActionEvaluation(feasible=True, success_chance=1.0)
+        outcome = SuccessOutcome(
+            description="Stored the berries in the basket",
+            object_mutations=[ObjectMutation(
+                selector="held_object",
+                usage_note="Used to carry berries.",
+                new_memory="This basket has been used to carry berries and loose greens.",
+                contents_add=[{"name": "dew-heavy berries", "quantity": 1.0, "source": "agent_inventory"}],
+            )],
+        )
+        result = ActionResult(intent=intent, evaluation=evaluation, success=True, outcome=outcome, tick_completed=11)
+
+        engine.apply(result, agent, world, {}, tick=11, day=0)
+
+        self.assertEqual(agent.inventory_count("dew-heavy berries"), 0.0)
+        self.assertEqual(basket.contents[0]["name"], "dew-heavy berries")
+        self.assertIn("carry berries", basket.object_memory)
 
 
 class TestConsequenceEngineObservers(unittest.TestCase):

@@ -221,6 +221,7 @@ class World:
 
         # Open-ended action system state
         self.world_objects: dict = {}  # id -> WorldObject
+        self.object_visual_registry: dict[str, dict] = {}
         self.known_object_types: set = set()
         self.latent_possibilities: list[str] = []
         self.innovation_registry: list[dict] = []
@@ -885,6 +886,7 @@ class World:
             "next_building_id": self._next_building_id,
             "tile_resource_state": self.tile_resource_state,
             "world_objects": {k: v.to_dict() for k, v in self.world_objects.items()},
+            "object_visual_registry": self.object_visual_registry,
             "known_object_types": list(self.known_object_types),
             "latent_possibilities": self.latent_possibilities[-50:],
             "innovation_registry": self.innovation_registry[-100:],
@@ -930,6 +932,8 @@ class World:
         if data.get("world_objects"):
             from systems.open_action_models import WorldObject
             self.world_objects = {k: WorldObject.from_dict(v) for k, v in data["world_objects"].items()}
+        if data.get("object_visual_registry"):
+            self.object_visual_registry = data["object_visual_registry"]
         if data.get("known_object_types"):
             self.known_object_types = set(data["known_object_types"])
         if data.get("latent_possibilities"):

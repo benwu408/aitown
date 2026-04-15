@@ -16,7 +16,7 @@ The agent's cognitive system (drives, emotions, beliefs, goals, reflection) prod
 
 Examples of decisions the LLM might generate:
 - "I'll dig a shallow trench from the river to the farmable land to water crops"
-- "I'm going to heat some clay from the riverbank in a fire to make a simple pot"
+- "I'm going to heat some clay from the riverbank in a fire to make a simple pot"q
 - "I'll offer to watch over the food storage tonight if someone gives me a meal"
 - "I want to scratch tally marks on a stone to track who owes me what"
 - "I'm going to pile rocks in a line to mark the boundary of what I consider my land"

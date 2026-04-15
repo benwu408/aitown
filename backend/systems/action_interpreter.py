@@ -6,7 +6,7 @@ import random
 from systems.open_action_models import (
     ActionIntent, ActionEvaluation, ActionResult,
     SuccessOutcome, FailureOutcome, ObjectSpec, WorldChange,
-    Observability, SocialImplications,
+    Observability, SocialImplications, ObjectMutation,
 )
 
 logger = logging.getLogger("agentica.actions")
@@ -38,6 +38,28 @@ def _parse_object_spec(d: dict) -> ObjectSpec:
         size=d.get("size", "small"),
         portable=bool(d.get("portable", True)),
         visual_description=d.get("visual_description", ""),
+        material_form=d.get("material_form", ""),
+        object_memory=d.get("object_memory", ""),
+        contents=d.get("contents", []) if isinstance(d.get("contents"), list) else [],
+        placement=d.get("placement") if isinstance(d.get("placement"), dict) else None,
+        relationships=d.get("relationships", {}) if isinstance(d.get("relationships"), dict) else {},
+        visual_archetype=d.get("visual_archetype", ""),
+        pixel_spec=d.get("pixel_spec"),
+    )
+
+
+def _parse_object_mutation(d: dict) -> ObjectMutation:
+    return ObjectMutation(
+        selector=d.get("selector", ""),
+        usage_note=d.get("usage_note", ""),
+        new_memory=d.get("new_memory", ""),
+        contents_add=d.get("contents_add", []) if isinstance(d.get("contents_add"), list) else [],
+        contents_remove=d.get("contents_remove", []) if isinstance(d.get("contents_remove"), list) else [],
+        location=d.get("location"),
+        holder=d.get("holder"),
+        placement=d.get("placement") if isinstance(d.get("placement"), dict) else None,
+        durability_delta=_safe_float(d.get("durability_delta"), 0.0),
+        relationships=d.get("relationships", {}) if isinstance(d.get("relationships"), dict) else {},
     )
 
 
@@ -60,6 +82,7 @@ def _parse_success(d: dict) -> SuccessOutcome:
         skill_practiced=d.get("skill_practiced", ""),
         skill_difficulty=_safe_float(d.get("skill_difficulty"), 0.5),
         knowledge_gained=d.get("knowledge_gained", ""),
+        object_mutations=[_parse_object_mutation(m) for m in d.get("object_mutations", []) if isinstance(m, dict)],
     )
 
 
@@ -70,6 +93,7 @@ def _parse_failure(d: dict) -> FailureOutcome:
         partial_result=d.get("partial_result"),
         injury_risk=_safe_float(d.get("injury_risk"), 0.0),
         injury_description=d.get("injury_description", ""),
+        object_mutations=[_parse_object_mutation(m) for m in d.get("object_mutations", []) if isinstance(m, dict)],
     )
 
 
@@ -113,6 +137,31 @@ class ActionInterpreter:
     def __init__(self):
         self.registered_action_types: dict[str, dict] = {}
 
+    def _describe_relevant_objects(self, agent, world) -> str:
+        lines = []
+        held_object = agent.get_held_object() if hasattr(agent, "get_held_object") else None
+        if held_object:
+            lines.append(
+                f"- Held object: {held_object.name}. {held_object.description} "
+                f"Memory: {held_object.object_memory or 'No settled understanding yet.'} "
+                f"Contents: {held_object.contents or 'empty'}"
+            )
+        owned_objects = []
+        if hasattr(world, "get_objects_by_owner"):
+            owned_objects = [obj for obj in world.get_objects_by_owner(agent.name) if obj.id != getattr(held_object, "id", None)]
+        nearby_objects = []
+        if hasattr(world, "get_objects_at"):
+            nearby_objects = [obj for obj in world.get_objects_at(agent.current_location) if obj.owner != agent.name]
+        for label, objs in (("Owned", owned_objects[:4]), ("Nearby", nearby_objects[:4])):
+            for obj in objs:
+                lines.append(
+                    f"- {label} object: {obj.name}. {obj.description} "
+                    f"Memory: {obj.object_memory or 'No settled understanding yet.'} "
+                    f"Contents: {obj.contents or 'empty'} "
+                    f"Placement: {obj.placement or 'none'}"
+                )
+        return "\n".join(lines) or "- No especially relevant objects right now."
+
     async def evaluate_action(self, agent, action_description: str, world) -> ActionResult:
         from llm.client import llm_client
 
@@ -132,6 +181,8 @@ class ActionInterpreter:
         skills_str = agent.skill_memory.get_prompt_summary()
         resources_str = ", ".join(world.get_resources_at(agent.current_location)) or "none"
         nearby_agents = self._get_nearby_names(agent, world)
+        held_object = agent.get_held_object() if hasattr(agent, "get_held_object") else None
+        object_context = self._describe_relevant_objects(agent, world)
 
         objects_here = []
         if hasattr(world, "get_objects_at"):
@@ -160,6 +211,7 @@ Strength: {strength}/1.0, Endurance: {endurance}/1.0, Dexterity: {dexterity}/1.0
 Health: {round(agent.health, 2)}/1.0, Energy: {energy}/1.0
 {skills_str}
 Carrying: {inventory_str}
+Currently holding: {held_object.name if held_object else 'nothing in hand'}
 
 WHAT THEY WANT TO DO
 "{action_description}"
@@ -169,6 +221,8 @@ Location: {agent.current_location}
 Resources here: {resources_str}
 Objects/structures here: {objects_str}
 Other agents present: {', '.join(nearby_agents) or 'nobody'}
+Relevant existing objects:
+{object_context}
 
 WORLD CONTEXT
 Weather: {weather}
@@ -198,7 +252,12 @@ Return JSON:
                 "durability": 0.0-1.0,
                 "size": "tiny/small/medium/large/structure",
                 "portable": true/false,
-                "visual_description": "brief visual for rendering"
+                "visual_description": "brief visual for rendering",
+                "material_form": "what it is physically made/shaped like",
+                "object_memory": "short natural-language summary of what this object seems to be for right now",
+                "contents": [],
+                "placement": {{"location": "where it ends up", "footprint_width": 1, "footprint_height": 1, "anchor": "empty_space/current_spot"}},
+                "relationships": {{}}
             }}
         ],
         "resources_produced": {{}},
@@ -213,14 +272,29 @@ Return JSON:
         ],
         "skill_practiced": "skill name",
         "skill_difficulty": 0.0-1.0,
-        "knowledge_gained": "what the agent learns"
+        "knowledge_gained": "what the agent learns",
+        "object_mutations": [
+            {{
+                "selector": "held_object / owned:Object Name / nearby:Object Name / created:Object Name",
+                "usage_note": "what just got discovered or done with this object",
+                "new_memory": "updated natural-language object memory",
+                "contents_add": [{{"name": "berries", "quantity": 1.0, "source": "agent_inventory"}}],
+                "contents_remove": [{{"name": "berries", "quantity": 1.0, "destination": "agent_inventory"}}],
+                "location": "new location or null",
+                "holder": "{agent.name} or null",
+                "placement": {{"location": "where it is placed", "footprint_width": 2, "footprint_height": 2, "anchor": "empty_space/current_spot"}} ,
+                "durability_delta": -0.02,
+                "relationships": {{}}
+            }}
+        ]
     }},
     "on_failure": {{
         "description": "what happens if it fails",
         "materials_wasted": {{}},
         "partial_result": "anything produced even in failure, or null",
         "injury_risk": 0.0-1.0,
-        "injury_description": "what kind of injury if unlucky"
+        "injury_description": "what kind of injury if unlucky",
+        "object_mutations": []
     }},
     "observability": {{
         "who_can_see": "anyone at this location / nearby / nobody",

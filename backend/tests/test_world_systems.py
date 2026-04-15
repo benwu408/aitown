@@ -21,6 +21,7 @@ sys.modules.setdefault("aiosqlite", fake_aiosqlite)
 import unittest
 from simulation.world import World, WEATHER_ACTION_MODIFIERS, SEASON_RESOURCE_MODIFIERS
 from systems.open_action_models import WorldObject, WorldChange
+from systems.object_visuals import normalize_object_archetype
 
 
 class _FakeAgent:
@@ -71,6 +72,13 @@ class TestWorldObjects(unittest.TestCase):
         world.decay_all_objects(weather="storm")
         # Storm decay_rate = 0.002 * 1.5 = 0.003
         self.assertLess(obj2.durability, 1.0)
+
+    def test_object_archetype_normalization_is_consistent(self):
+        spear_a = normalize_object_archetype("Crude Wooden Spear", "tool", "A sharpened wooden spear")
+        spear_b = normalize_object_archetype("Wood Spear", "tool", "Rough spear for hunting")
+        bowl = normalize_object_archetype("Clay Bowl", "container", "A fired clay bowl")
+        self.assertEqual(spear_a, spear_b)
+        self.assertNotEqual(spear_a, bowl)
 
 
 class TestEnvironmentalChange(unittest.TestCase):

@@ -47,6 +47,7 @@ class Agent:
         self.project_roles: list[dict] = []
         self.current_institution_roles: list[dict] = []
         self.active_conflicts: list[dict] = []
+        self.held_object_id: str | None = None
         self.plan_mode: str = "improvising"
         self.plan_deviation_reason: str = ""
         self.self_concept: str | None = None  # Emerges over time
@@ -130,31 +131,84 @@ class Agent:
 
     def _inventory_count_total(self) -> int:
         """Total number of items held."""
-        return sum(int(item.get("quantity", 1)) for item in self.inventory)
+        return int(sum(float(item.get("quantity", 1) or 0) for item in self.inventory))
 
-    def inventory_count(self, item_name: str) -> int:
-        total = 0
+    def inventory_count(self, item_name: str) -> float:
+        total = 0.0
         for item in self.inventory:
             if item.get("name") == item_name:
-                total += int(item.get("quantity", 1))
+                total += float(item.get("quantity", 1) or 0)
         return total
 
-    def consume_inventory(self, item_name: str, quantity: int) -> bool:
-        remaining = quantity
+    def add_inventory_item(self, item_name: str, quantity: float = 1.0, extra: dict | None = None):
+        quantity = float(quantity)
+        if quantity <= 0:
+            return
+        if extra and extra.get("object_id"):
+            self.inventory.append({"name": item_name, "quantity": quantity, **extra})
+            return
+        existing = next((item for item in self.inventory if item.get("name") == item_name and not item.get("object_id")), None)
+        if existing:
+            existing["quantity"] = round(float(existing.get("quantity", 0) or 0) + quantity, 2)
+            if extra:
+                existing.update(extra)
+        else:
+            payload = {"name": item_name, "quantity": round(quantity, 2)}
+            if extra:
+                payload.update(extra)
+            self.inventory.append(payload)
+
+    def remove_inventory_amount(self, item_name: str, quantity: float) -> bool:
+        remaining = float(quantity)
         for item in list(self.inventory):
             if item.get("name") != item_name:
                 continue
-            item_qty = int(item.get("quantity", 1))
+            item_qty = float(item.get("quantity", 1) or 0)
             take = min(item_qty, remaining)
             remaining -= take
-            left = item_qty - take
-            if left > 0:
+            left = round(item_qty - take, 2)
+            if left > 1e-6:
                 item["quantity"] = left
             else:
                 self.inventory.remove(item)
             if remaining <= 0:
+                self.reconcile_held_object()
                 return True
+        self.reconcile_held_object()
         return remaining <= 0
+
+    def consume_inventory(self, item_name: str, quantity: int | float) -> bool:
+        return self.remove_inventory_amount(item_name, float(quantity))
+
+    def get_held_object(self):
+        if not self.held_object_id:
+            return None
+        return self.world.world_objects.get(self.held_object_id)
+
+    def set_held_object(self, object_id: str | None):
+        self.held_object_id = object_id
+        self.reconcile_held_object()
+
+    def reconcile_held_object(self):
+        valid_object_ids = {
+            item.get("object_id") for item in self.inventory
+            if item.get("object_id")
+        }
+        if self.held_object_id and self.held_object_id in valid_object_ids:
+            held = self.world.world_objects.get(self.held_object_id)
+            if held and held.owner in (self.name, self.id, None):
+                return
+        self.held_object_id = None
+        preferred_categories = ("tool", "mechanism", "container", "art", "marker")
+        for category in preferred_categories:
+            for item in self.inventory:
+                if item.get("object_id") and item.get("category") == category:
+                    self.held_object_id = item["object_id"]
+                    return
+        for item in self.inventory:
+            if item.get("object_id"):
+                self.held_object_id = item["object_id"]
+                return
 
     def add_blocked_reason(self, reason: str, tick: int, severity: float = 0.5):
         if not reason:
@@ -531,6 +585,11 @@ class Agent:
 
     def _find_home(self) -> str | None:
         """Find the agent's claimed shelter."""
+        for obj in self.world.get_objects_by_owner(self.name):
+            memory = f"{obj.name} {obj.description} {obj.object_memory}".lower()
+            if any(word in memory for word in ("sleep", "shelter", "lean-to", "roof", "hut", "bed", "rest")):
+                if obj.location:
+                    return obj.location
         if self.current_location in self.world.locations:
             current = self.world.locations[self.current_location]
             if current.get("type") == "built_structure" and current.get("claimed_by") == self.name:
@@ -576,12 +635,20 @@ class Agent:
                 "health": round(self.health, 2),
                 "itemCount": self._inventory_count_total(),
                 "tradeCount": len(self.transactions),
+                "wealth": 0,
             },
             "emotions": self.emotional_state.to_dict(),
             "drives": self.drives.to_dict(),
             "workingMemory": self.working_memory.to_dict(),
             "transactions": self.transactions[-5:],
-            "inventory": [{"name": i.get("name", str(i)), "quantity": i.get("quantity", 1)} for i in self.inventory[:10]],
+            "inventory": [{
+                "name": i.get("name", str(i)),
+                "quantity": i.get("quantity", 1),
+                "object_id": i.get("object_id"),
+                "category": i.get("category"),
+            } for i in self.inventory[:10]],
+            "heldObjectId": self.held_object_id,
+            "heldObject": self.get_held_object().to_dict() if self.get_held_object() else None,
             "socialCommitments": self.social_commitments[:5],
             "longTermGoals": self.long_term_goals[:5],
             "activeIntentions": self.active_intentions[:5],
@@ -640,6 +707,8 @@ class Agent:
             "opinions": {},
             "reputation": self.reputation,
             "inventory": self.inventory,
+            "heldObjectId": self.held_object_id,
+            "heldObject": self.get_held_object().to_dict() if self.get_held_object() else None,
             "socialCommitments": self.social_commitments,
             "memories": self.episodic_memory.to_list(50),
             "beliefs": self.belief_system.to_list(),

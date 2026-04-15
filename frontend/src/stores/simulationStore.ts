@@ -32,6 +32,8 @@ interface SimulationState {
   patterns: PatternEvent[];
   timelineEvents: TimelineEvent[];
   actionResults: ActionResultEvent[];
+  selectedBuilding: any | null;
+  selectedObject: WorldObject | null;
 
   setConnected: (v: boolean) => void;
   updateFromTick: (data: {
@@ -52,6 +54,8 @@ interface SimulationState {
     timelineEvents?: TimelineEvent[];
   }) => void;
   selectAgent: (id: string | null) => void;
+  selectBuilding: (b: any | null) => void;
+  selectObject: (o: WorldObject | null) => void;
   setAgentDetail: (detail: AgentDetail | null) => void;
   setSpeed: (speed: number) => void;
   setDashboardData: (data: any) => void;
@@ -89,6 +93,8 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   patterns: [],
   timelineEvents: [],
   actionResults: [],
+  selectedBuilding: null,
+  selectedObject: null,
 
   setConnected: (v) => set({ connected: v }),
 
@@ -230,7 +236,9 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     });
   },
 
-  selectAgent: (id) => set({ selectedAgentId: id, selectedAgentDetail: null }),
+  selectAgent: (id) => set({ selectedAgentId: id, selectedAgentDetail: null, selectedBuilding: null, selectedObject: null }),
+  selectBuilding: (b: any | null) => set({ selectedBuilding: b, selectedAgentId: null, selectedAgentDetail: null, selectedObject: null }),
+  selectObject: (o: WorldObject | null) => set({ selectedObject: o, selectedAgentId: null, selectedAgentDetail: null, selectedBuilding: null }),
   setAgentDetail: (detail) => set({ selectedAgentDetail: detail }),
   setSpeed: (speed) => set({ speed }),
   setDashboardData: (data: any) => set({ dashboardData: data, storyHighlights: data?.storyHighlights || [] }),

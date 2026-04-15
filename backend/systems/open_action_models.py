@@ -22,6 +22,27 @@ class ObjectSpec:
     size: str = "small"  # tiny/small/medium/large/structure
     portable: bool = True
     visual_description: str = ""
+    material_form: str = ""
+    object_memory: str = ""
+    contents: list[dict] = field(default_factory=list)
+    placement: dict | None = None
+    relationships: dict = field(default_factory=dict)
+    visual_archetype: str = ""
+    pixel_spec: dict | None = None
+
+
+@dataclass
+class ObjectMutation:
+    selector: str
+    usage_note: str = ""
+    new_memory: str = ""
+    contents_add: list[dict] = field(default_factory=list)
+    contents_remove: list[dict] = field(default_factory=list)
+    location: str | None = None
+    holder: str | None = None
+    placement: dict | None = None
+    durability_delta: float = 0.0
+    relationships: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -42,6 +63,7 @@ class SuccessOutcome:
     skill_practiced: str = ""
     skill_difficulty: float = 0.5
     knowledge_gained: str = ""
+    object_mutations: list[ObjectMutation] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +73,7 @@ class FailureOutcome:
     partial_result: str | None = None
     injury_risk: float = 0.0
     injury_description: str = ""
+    object_mutations: list[ObjectMutation] = field(default_factory=list)
 
 
 @dataclass
@@ -103,6 +126,14 @@ class WorldObject:
     size: str = "small"
     portable: bool = True
     visual_description: str = ""
+    material_form: str = ""
+    object_memory: str = ""
+    usage_history: list[str] = field(default_factory=list)
+    contents: list[dict] = field(default_factory=list)
+    placement: dict | None = None
+    relationships: dict = field(default_factory=dict)
+    visual_archetype: str = ""
+    pixel_spec: dict | None = None
     created_by: str = ""
     created_on: int = 0
     location: str | None = None
@@ -123,6 +154,14 @@ class WorldObject:
             "size": self.size,
             "portable": self.portable,
             "visual_description": self.visual_description,
+            "material_form": self.material_form,
+            "object_memory": self.object_memory,
+            "usage_history": self.usage_history,
+            "contents": self.contents,
+            "placement": self.placement,
+            "relationships": self.relationships,
+            "visual_archetype": self.visual_archetype,
+            "pixel_spec": self.pixel_spec,
             "created_by": self.created_by,
             "created_on": self.created_on,
             "location": self.location,
@@ -136,6 +175,10 @@ class WorldObject:
             category=d.get("category", "other"), effects=d.get("effects", {}),
             durability=d.get("durability", 1.0), size=d.get("size", "small"),
             portable=d.get("portable", True), visual_description=d.get("visual_description", ""),
+            material_form=d.get("material_form", ""), object_memory=d.get("object_memory", ""),
+            usage_history=d.get("usage_history", []), contents=d.get("contents", []),
+            placement=d.get("placement"), relationships=d.get("relationships", {}),
+            visual_archetype=d.get("visual_archetype", ""), pixel_spec=d.get("pixel_spec"),
             created_by=d.get("created_by", ""), created_on=d.get("created_on", 0),
             location=d.get("location"), owner=d.get("owner"),
         )

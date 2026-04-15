@@ -3,7 +3,7 @@ import { Application, Graphics, Container, Text, TextStyle } from "pixi.js";
 import { useSimulationStore } from "../stores/simulationStore";
 import { TILE_WIDTH, TILE_HEIGHT, gridToScreen } from "../utils/isometric";
 import { TILE_COLORS, BUILDING_COLORS, AGENT_COLORS, ACTION_ICONS } from "../utils/formatting";
-import { AgentData, WorldObject } from "../types/agent";
+import { AgentData, WorldObject, PixelSpec } from "../types/agent";
 
 interface Props {
   onAgentClick?: (agentId: string) => void;
@@ -287,12 +287,13 @@ export default function GameCanvas({ onAgentClick }: Props) {
             text: displayText,
             style: new TextStyle({
               fontFamily: "sans-serif",
-              fontSize: 7,
+              fontSize: 14,
               fill: 0x333333,
               wordWrap: true,
-              wordWrapWidth: maxWrapWidth,
+              wordWrapWidth: maxWrapWidth * 2,
             }),
           });
+          textObj.scale.set(0.5);
           const padding = 4;
           const bubbleW = textObj.width + padding * 2;
           const bubbleH = textObj.height + padding * 2;
@@ -425,6 +426,52 @@ export default function GameCanvas({ onAgentClick }: Props) {
 
           if (closestId && onAgentClick) {
             onAgentClick(closestId);
+            useSimulationStore.getState().selectAgent(closestId);
+          } else {
+            // Check buildings
+            const currentBuildings = useSimulationStore.getState().buildings;
+            let clickedBuilding: any = null;
+            let bDist = 30;
+            for (const b of currentBuildings) {
+              const cx = b.col + (b.width || 2) / 2;
+              const cy = b.row + (b.height || 2) / 2;
+              const { x: bx, y: by } = gridToScreen(cx, cy);
+              const dx = worldX - bx;
+              const dy = worldY - by;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist < bDist) {
+                bDist = dist;
+                clickedBuilding = b;
+              }
+            }
+            if (clickedBuilding) {
+              useSimulationStore.getState().selectBuilding(clickedBuilding);
+            } else {
+              // Check world objects
+              const currentObjects = useSimulationStore.getState().worldObjects;
+              let clickedObj: WorldObject | null = null;
+              let oDist = 20;
+              for (const obj of currentObjects) {
+                if (obj.portable && obj.owner && !obj.location) {
+                  continue;
+                }
+                let gc = 20, gr = 20;
+                if (obj.location) {
+                  let hash = 0;
+                  for (let i = 0; i < obj.location.length; i++) hash = ((hash << 5) - hash + obj.location.charCodeAt(i)) | 0;
+                  gc = 5 + Math.abs(hash % 30);
+                  gr = 5 + Math.abs((hash >> 8) % 30);
+                }
+                const { x: ox, y: oy } = gridToScreen(gc, gr);
+                const dx = worldX - ox;
+                const dy = worldY - (oy - 4);
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < oDist) { oDist = dist; clickedObj = obj; }
+              }
+              if (clickedObj) {
+                useSimulationStore.getState().selectObject(clickedObj);
+              }
+            }
           }
         }
         dragRef.current.dragging = false;
@@ -855,17 +902,18 @@ export default function GameCanvas({ onAgentClick }: Props) {
         text: b.label,
         style: new TextStyle({
           fontFamily: "monospace",
-          fontSize: 8,
+          fontSize: 16,
           fill: 0xffffff,
           fontWeight: "bold",
           dropShadow: {
             alpha: 0.9,
-            blur: 3,
+            blur: 0,
             color: 0x000000,
             distance: 1,
           },
         }),
       });
+      label.scale.set(0.5);
       label.x = center.x - label.width / 2;
       label.y = center.y - Math.max(bh, 5) - 16;
       group.addChild(label);
@@ -920,16 +968,17 @@ function createAgentSprite(agent: AgentData): Container {
     text: agent.name.split(" ")[0],
     style: new TextStyle({
       fontFamily: "monospace",
-      fontSize: 7,
+      fontSize: 14,
       fill: 0xffffff,
       dropShadow: {
         alpha: 0.9,
-        blur: 2,
+        blur: 0,
         color: 0x000000,
-        distance: 0,
+        distance: 1,
       },
     }),
   });
+  nameText.scale.set(0.5);
   nameText.x = -nameText.width / 2;
   nameText.y = -24;
   nameText.label = "name";
@@ -946,6 +995,10 @@ function createAgentSprite(agent: AgentData): Container {
   iconText.y = -22;
   iconText.label = "icon";
   container.addChild(iconText);
+
+  const heldLayer = new Container();
+  heldLayer.label = "held";
+  container.addChild(heldLayer);
 
   // Distress indicator (hidden by default): red pulsing circle
   const distress = new Graphics();
@@ -1004,6 +1057,14 @@ function updateAgentSprite(
   if (distress) {
     distress.visible = isDistressed;
   }
+
+  const heldLayer = sprite.children.find((c) => c.label === "held") as Container | undefined;
+  if (heldLayer) {
+    heldLayer.removeChildren();
+    if (agent.heldObject && agent.currentAction !== "sleeping") {
+      heldLayer.addChild(createHeldObjectGraphic(agent.heldObject));
+    }
+  }
 }
 
 const OBJECT_CATEGORY_COLORS: Record<string, number> = {
@@ -1039,29 +1100,24 @@ const OBJECT_CATEGORY_LABELS: Record<string, string> = {
 function renderWorldObjects(
   layer: Container,
   objects: WorldObject[],
-  agents: Record<string, AgentData>
+  _agents: Record<string, AgentData>
 ) {
   // Clear existing
   layer.removeChildren();
 
   for (const obj of objects) {
+    if (obj.portable && obj.owner && !obj.location) {
+      continue;
+    }
     const container = new Container();
     const color = OBJECT_CATEGORY_COLORS[obj.category] || 0x888888;
     const label = OBJECT_CATEGORY_LABELS[obj.category] || "?";
 
-    // Determine position: if portable and has owner, show near agent; otherwise use location
+    // Determine position from world placement only
     let gridCol = 20;
     let gridRow = 20;
 
-    if (obj.portable && obj.owner) {
-      const ownerAgent = Object.values(agents).find(
-        (a) => a.name === obj.owner || a.id === obj.owner
-      );
-      if (ownerAgent) {
-        gridCol = ownerAgent.position[0] + 0.5;
-        gridRow = ownerAgent.position[1] + 0.5;
-      }
-    } else if (obj.location) {
+    if (obj.location) {
       // Hash location string to a rough grid position
       let hash = 0;
       for (let i = 0; i < obj.location.length; i++) {
@@ -1076,9 +1132,6 @@ function renderWorldObjects(
     container.y = y - 4;
     container.zIndex = gridCol + gridRow + 50;
 
-    const g = new Graphics();
-
-    // Size determines shape size
     const sizeMap: Record<string, number> = {
       tiny: 3,
       small: 5,
@@ -1088,19 +1141,25 @@ function renderWorldObjects(
     };
     const radius = sizeMap[obj.size] || 5;
 
-    if (obj.category === "structure" || obj.category === "marker") {
-      // Ground overlay: diamond shape
-      g.poly([
-        { x: 0, y: -radius },
-        { x: radius, y: 0 },
-        { x: 0, y: radius },
-        { x: -radius, y: 0 },
-      ]);
-      g.fill({ color, alpha: 0.6 });
-      g.stroke({ width: 0.5, color: darkenColor(color, 0.7), alpha: 0.8 });
+    if (obj.pixel_spec) {
+      const pixelGraphic = createPixelSpecGraphic(obj.pixel_spec, 1);
+      if (pixelGraphic) {
+        pixelGraphic.scale.set(0.45);
+        pixelGraphic.y = -6;
+        container.addChild(pixelGraphic);
+      }
     } else {
-      // Small object: circle/rect
-      if (obj.size === "tiny") {
+      const g = new Graphics();
+      if (obj.category === "structure" || obj.category === "marker") {
+        g.poly([
+          { x: 0, y: -radius },
+          { x: radius, y: 0 },
+          { x: 0, y: radius },
+          { x: -radius, y: 0 },
+        ]);
+        g.fill({ color, alpha: 0.6 });
+        g.stroke({ width: 0.5, color: darkenColor(color, 0.7), alpha: 0.8 });
+      } else if (obj.size === "tiny") {
         g.circle(0, 0, radius);
         g.fill({ color, alpha: 0.8 });
       } else {
@@ -1108,39 +1167,23 @@ function renderWorldObjects(
         g.fill({ color, alpha: 0.7 });
         g.stroke({ width: 0.5, color: darkenColor(color, 0.7), alpha: 0.6 });
       }
+      container.addChild(g);
     }
 
-    container.addChild(g);
-
-    // Category letter label
+    // Category letter label (no name shown — click to inspect)
     const labelText = new Text({
       text: label,
       style: new TextStyle({
         fontFamily: "monospace",
-        fontSize: Math.max(6, radius),
+        fontSize: Math.max(12, radius * 2),
         fill: 0xffffff,
         fontWeight: "bold",
       }),
     });
+    labelText.scale.set(0.5);
     labelText.x = -labelText.width / 2;
     labelText.y = -labelText.height / 2;
     container.addChild(labelText);
-
-    // Name tooltip on hover (just tiny text below)
-    if (obj.size !== "tiny") {
-      const nameText = new Text({
-        text: obj.name,
-        style: new TextStyle({
-          fontFamily: "monospace",
-          fontSize: 5,
-          fill: 0xcccccc,
-          dropShadow: { alpha: 0.7, blur: 1, color: 0x000000, distance: 0 },
-        }),
-      });
-      nameText.x = -nameText.width / 2;
-      nameText.y = radius + 2;
-      container.addChild(nameText);
-    }
 
     layer.addChild(container);
   }
@@ -1151,4 +1194,53 @@ function darkenColor(color: number, factor: number): number {
   const g = Math.floor(((color >> 8) & 0xff) * factor);
   const b = Math.floor((color & 0xff) * factor);
   return (r << 16) | (g << 8) | b;
+}
+
+function colorToNumber(color: string): number {
+  return Number.parseInt(color.replace("#", ""), 16);
+}
+
+function createPixelSpecGraphic(spec: PixelSpec, pixelSize = 1): Container | null {
+  if (!spec?.pixels?.length || !spec.palette?.length) return null;
+  const container = new Container();
+  const size = spec.size || spec.pixels.length;
+  for (let row = 0; row < spec.pixels.length; row++) {
+    const line = spec.pixels[row];
+    for (let col = 0; col < line.length; col++) {
+      const paletteIndex = Number.parseInt(line[col], 10);
+      if (!Number.isFinite(paletteIndex) || paletteIndex <= 0) continue;
+      const shade = spec.palette[paletteIndex];
+      if (!shade || shade === "transparent") continue;
+      const pixel = new Graphics();
+      pixel.rect(0, 0, pixelSize, pixelSize);
+      pixel.fill(colorToNumber(shade));
+      pixel.x = (col - size / 2) * pixelSize;
+      pixel.y = (row - size / 2) * pixelSize;
+      container.addChild(pixel);
+    }
+  }
+  return container;
+}
+
+function createHeldObjectGraphic(obj: WorldObject): Container {
+  if (obj.pixel_spec) {
+    const pixelGraphic = createPixelSpecGraphic(obj.pixel_spec, 1);
+    if (pixelGraphic) {
+      const handOffset = obj.pixel_spec.hand_offset || { x: 5, y: -8 };
+      pixelGraphic.x = handOffset.x;
+      pixelGraphic.y = handOffset.y;
+      pixelGraphic.rotation = obj.pixel_spec.rotation_hint || 0;
+      return pixelGraphic;
+    }
+  }
+
+  const color = OBJECT_CATEGORY_COLORS[obj.category] || 0x888888;
+  const fallback = new Container();
+  const g = new Graphics();
+  g.roundRect(0, 0, 5, 5, 1);
+  g.fill({ color, alpha: 0.85 });
+  fallback.x = 5;
+  fallback.y = -9;
+  fallback.addChild(g);
+  return fallback;
 }

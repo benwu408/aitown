@@ -48,7 +48,9 @@ export interface AgentData {
   fallbackPlan?: any | null;
   blockedReasons?: any[];
   decisionRationale?: any;
-  inventory?: Array<{ name: string; quantity?: number }>;
+  inventory?: Array<{ name: string; quantity?: number; object_id?: string; category?: string }>;
+  heldObjectId?: string | null;
+  heldObject?: WorldObject | null;
   emotions?: Record<string, number | string>;
   drives?: Record<string, number | string>;
   currentInstitutionRoles?: any[];
@@ -137,10 +139,27 @@ export interface WorldObject {
   size: 'tiny' | 'small' | 'medium' | 'large' | 'structure';
   portable: boolean;
   visual_description: string;
+  material_form?: string;
+  object_memory?: string;
+  usage_history?: string[];
+  contents?: Array<{ name: string; quantity?: number; object_id?: string }>;
+  placement?: Record<string, any> | null;
+  relationships?: Record<string, any>;
+  visual_archetype?: string;
+  pixel_spec?: PixelSpec | null;
   created_by: string;
   created_on: number;
   location: string | null;
   owner: string | null;
+}
+
+export interface PixelSpec {
+  size: number;
+  palette: string[];
+  pixels: string[];
+  anchor?: { x: number; y: number };
+  hand_offset?: { x: number; y: number };
+  rotation_hint?: number;
 }
 
 export interface ActionResultEvent {

@@ -16,8 +16,112 @@ export default function InspectorPanel({ onInspect }: Props) {
   const selectedId = useSimulationStore((s) => s.selectedAgentId);
   const agents = useSimulationStore((s) => s.agents);
   const detail = useSimulationStore((s) => s.selectedAgentDetail);
+  const selectedBuilding = useSimulationStore((s) => s.selectedBuilding);
+  const selectedObject = useSimulationStore((s) => s.selectedObject);
 
   const agent = selectedId ? agents[selectedId] : null;
+
+  // Building inspector
+  if (!agent && selectedBuilding) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="p-3 border-b border-gray-800 flex items-center gap-2">
+          <button
+            onClick={() => useSimulationStore.getState().selectBuilding(null)}
+            className="text-xs text-gray-500 hover:text-gray-300"
+          >&lt; Back</button>
+          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Building</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded bg-amber-900/40 flex items-center justify-center text-amber-400 text-sm font-bold">B</div>
+            <div>
+              <div className="text-sm font-medium text-gray-200">{selectedBuilding.label}</div>
+              <div className="text-xs text-gray-500">{selectedBuilding.purpose || selectedBuilding.type}</div>
+            </div>
+          </div>
+          <div className="space-y-1.5 text-xs">
+            <div className="flex justify-between"><span className="text-gray-500">Owner</span><span className="text-gray-300">{selectedBuilding.owner || "Unclaimed"}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">Purpose</span><span className="text-gray-300">{selectedBuilding.purpose || "General"}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="text-gray-300">{selectedBuilding.type}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">Position</span><span className="text-gray-300">({selectedBuilding.col}, {selectedBuilding.row})</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">Size</span><span className="text-gray-300">{selectedBuilding.width}x{selectedBuilding.height} tiles</span></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // World object inspector
+  if (!agent && selectedObject) {
+    const obj = selectedObject;
+    const durPct = Math.round((obj.durability || 1) * 100);
+    return (
+      <div className="flex flex-col h-full">
+        <div className="p-3 border-b border-gray-800 flex items-center gap-2">
+          <button
+            onClick={() => useSimulationStore.getState().selectObject(null)}
+            className="text-xs text-gray-500 hover:text-gray-300"
+          >&lt; Back</button>
+          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Object</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded bg-yellow-900/40 flex items-center justify-center text-yellow-400 text-sm font-bold">{obj.category?.[0]?.toUpperCase() || "?"}</div>
+            <div>
+              <div className="text-sm font-medium text-gray-200">{obj.name}</div>
+              <div className="text-xs text-gray-500">{obj.category} / {obj.size}</div>
+            </div>
+          </div>
+          {obj.description && <p className="text-xs text-gray-400 bg-gray-800/50 rounded p-2">{obj.description}</p>}
+          {obj.object_memory && <p className="text-xs text-emerald-200 bg-emerald-950/30 rounded p-2">{obj.object_memory}</p>}
+          {obj.material_form && <p className="text-xs text-gray-500 italic">{obj.material_form}</p>}
+          {obj.visual_description && <p className="text-xs text-gray-500 italic">{obj.visual_description}</p>}
+          <div className="space-y-1.5 text-xs">
+            <div className="flex justify-between"><span className="text-gray-500">Created by</span><span className="text-gray-300">{obj.created_by || "Unknown"}</span></div>
+            {obj.owner && <div className="flex justify-between"><span className="text-gray-500">Owner</span><span className="text-gray-300">{obj.owner}</span></div>}
+            {obj.location && <div className="flex justify-between"><span className="text-gray-500">Location</span><span className="text-gray-300">{obj.location}</span></div>}
+            <div className="flex justify-between"><span className="text-gray-500">Portable</span><span className="text-gray-300">{obj.portable ? "Yes" : "No"}</span></div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-500">Durability</span>
+              <div className="flex items-center gap-1">
+                <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${durPct > 60 ? "bg-green-500" : durPct > 30 ? "bg-yellow-500" : "bg-red-500"}`} style={{ width: `${durPct}%` }} />
+                </div>
+                <span className="text-gray-400">{durPct}%</span>
+              </div>
+            </div>
+          </div>
+          {obj.effects && Object.keys(obj.effects).length > 0 && (
+            <div>
+              <div className="text-xs text-gray-500 mb-1">Effects</div>
+              <div className="space-y-0.5">
+                {Object.entries(obj.effects).map(([k, v]) => (
+                  <div key={k} className="flex justify-between text-xs">
+                    <span className="text-gray-400">{k}</span>
+                    <span className={`${(v as number) > 0 ? "text-green-400" : "text-red-400"}`}>{(v as number) > 0 ? "+" : ""}{String(v)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {obj.contents && obj.contents.length > 0 && (
+            <div>
+              <div className="text-xs text-gray-500 mb-1">Contents</div>
+              <div className="space-y-0.5">
+                {obj.contents.map((entry, idx) => (
+                  <div key={`${entry.name}-${idx}`} className="flex justify-between text-xs">
+                    <span className="text-gray-300">{entry.name}</span>
+                    <span className="text-gray-500">x{entry.quantity ?? 1}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (!agent) {
     return (
@@ -470,6 +574,7 @@ function KnowledgeContent({ agent, detail }: { agent: any; detail: any }) {
 
 function InventoryContent({ agent, detail }: { agent: any; detail: any }) {
   const inventory = (agent as any)?.inventory || detail?.inventory || [];
+  const heldObject = (agent as any)?.heldObject || detail?.heldObject || null;
   const worldObjects = useSimulationStore((s) => s.worldObjects);
   const ownedObjects = worldObjects.filter(
     (o) => o.owner === agent.name || o.owner === agent.id
@@ -478,6 +583,32 @@ function InventoryContent({ agent, detail }: { agent: any; detail: any }) {
 
   return (
     <div className="space-y-3 text-xs">
+      {heldObject && (
+        <div className="p-2 bg-emerald-900/10 border border-emerald-900/30 rounded">
+          <div className="text-[10px] text-gray-500 uppercase mb-1">Held Item</div>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-200">{heldObject.name}</span>
+            <span className="text-[9px] text-emerald-300 capitalize">{heldObject.category}</span>
+          </div>
+          {heldObject.visual_description && (
+            <div className="text-[10px] text-gray-500 mt-1 italic">{heldObject.visual_description}</div>
+          )}
+          {heldObject.object_memory && (
+            <div className="text-[10px] text-emerald-200 mt-1">{heldObject.object_memory}</div>
+          )}
+          {heldObject.contents && heldObject.contents.length > 0 && (
+            <div className="mt-1 space-y-0.5">
+              {heldObject.contents.map((entry: any, idx: number) => (
+                <div key={`${entry.name}-${idx}`} className="flex justify-between text-[10px]">
+                  <span className="text-gray-300">{entry.name}</span>
+                  <span className="text-gray-500">x{entry.quantity ?? 1}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Inventory items */}
       <div>
         <div className="text-[10px] text-gray-500 uppercase mb-1">
@@ -489,7 +620,7 @@ function InventoryContent({ agent, detail }: { agent: any; detail: any }) {
           <div className="space-y-0.5">
             {inventory.map((item: any, i: number) => (
               <div key={i} className="text-gray-400 p-1 bg-gray-800/20 rounded flex items-center justify-between">
-                <span>{item.name || item}</span>
+                <span>{item.name || item}{item.object_id && heldObject?.id === item.object_id ? " (held)" : ""}</span>
                 {item.quantity && <span className="text-gray-600">x{item.quantity}</span>}
               </div>
             ))}

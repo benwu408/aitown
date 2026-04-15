@@ -31,11 +31,13 @@ WHAT YOU KNOW:
 - Immediate intentions: {active_intentions}
 - Morning plan: {morning_plan}
 - Beliefs relevant here: {beliefs}
+- Relevant objects and what they seem to be for: {object_context}
 
 NEARBY PEOPLE:
 {nearby_agents}
 
 YOUR SKILLS: {skills}
+CURRENTLY HELD: {held_item}
 
 AVAILABLE LOCATIONS: {known_locations}
 
@@ -242,6 +244,19 @@ class DecisionPromptConstructor:
             health_desc = "injured"
 
         role = agent.self_concept or "newcomer"
+        held = agent.get_held_object() if hasattr(agent, "get_held_object") else None
+        object_context_parts = []
+        if held:
+            object_context_parts.append(
+                f"Held: {held.name}. {getattr(held, 'object_memory', '') or getattr(held, 'description', '') or 'No settled use yet.'}"
+            )
+        world_ref = getattr(agent, "world", None)
+        if world_ref and hasattr(world_ref, "get_objects_at"):
+            for obj in world_ref.get_objects_at(agent.current_location)[:4]:
+                object_context_parts.append(
+                    f"Nearby: {obj.name}. {obj.object_memory or obj.description or 'No settled use yet.'}"
+                )
+        object_context = " | ".join(object_context_parts) or "No especially meaningful objects stand out."
 
         system = f"You are {agent.name}, a {agent.profile.age}-year-old {role} in a frontier settlement."
         prompt = DECISION_PROMPT.format(
@@ -264,8 +279,10 @@ class DecisionPromptConstructor:
             active_intentions=active_intentions_text,
             morning_plan=agent.daily_plan or "No plan yet",
             beliefs=beliefs_text,
+            object_context=object_context,
             nearby_agents="\n".join(nearby_parts) or "Nobody around",
             skills=agent.skill_memory.get_prompt_summary(),
+            held_item=held.name if held else "nothing",
             known_locations=known_locs,
         )
         return system, prompt
